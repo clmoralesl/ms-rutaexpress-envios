@@ -67,15 +67,6 @@
                         <scope>runtime</scope>
                 </dependency>
 
-                <!-- Migraciones de esquema -->
-                <dependency>
-                        <groupId>org.flywaydb</groupId>
-                        <artifactId>flyway-core</artifactId>
-                </dependency>
-                <dependency>
-                        <groupId>org.flywaydb</groupId>
-                        <artifactId>flyway-database-oracle</artifactId>
-                </dependency>
 
                 <!-- Testing -->
                 <dependency>
