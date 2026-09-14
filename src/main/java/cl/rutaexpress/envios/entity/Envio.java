@@ -7,7 +7,7 @@ import java.time.LocalDateTime;
 
 @Entity
 @Table(name = "ENVIOS", schema = "USER_ENVIOS")
-public class Shipment {
+public class Envio {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -42,10 +42,10 @@ public class Shipment {
     @Column(name = "fecha_actualizacion", nullable = false)
     private LocalDateTime fechaActualizacion;
 
-    protected Shipment() {
+    protected Envio() {
     }
 
-    public Shipment(
+    public Envio(
             String codigoSeguimiento,
             String rutRemitente,
             String rutDestinatario,
