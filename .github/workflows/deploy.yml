@@ -40,4 +40,4 @@ jobs:
 
     - name: Restart Deployment in EKS
       run: |
-        kubectl rollout restart deployment/ms-rutaexpress-envios
+        kubectl rollout restart deployment/ms-rutaexpress-envios || echo "El deployment no existe aún en el clúster. Se ignorará el reinicio."
