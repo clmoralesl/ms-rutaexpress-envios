@@ -4,8 +4,10 @@ import cl.rutaexpress.envios.client.CatalogoClient;
 import cl.rutaexpress.envios.config.RabbitMQConfig;
 import cl.rutaexpress.envios.dto.CrearEnvioRequest;
 import cl.rutaexpress.envios.dto.EnvioResponse;
+import cl.rutaexpress.envios.dto.EventoEnvioKafka;
 import cl.rutaexpress.envios.dto.MensajeEnvelope;
 import cl.rutaexpress.envios.entity.EstadoEnvio;
+import cl.rutaexpress.envios.publisher.PublicadorKafkaEnvios;
 import cl.rutaexpress.envios.publisher.PublicadorRabbitMQ;
 import cl.rutaexpress.envios.repository.EnvioRepository;
 import cl.rutaexpress.envios.service.EnvioService;
@@ -22,6 +24,7 @@ import java.math.BigDecimal;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
@@ -41,13 +44,16 @@ class EnvioIntegrationTest {
     @MockBean
     private PublicadorRabbitMQ publicadorRabbitMQ;
 
+    @MockBean
+    private PublicadorKafkaEnvios publicadorKafkaEnvios;
+
     @BeforeEach
     void setUp() {
         envioRepository.deleteAll();
     }
 
     @Test
-    @DisplayName("Ciclo completo E2E: Crear -> Aceptar (descuento cupo y mensajes RabbitMQ) -> En Ruta -> Entregado")
+    @DisplayName("Ciclo completo E2E: Crear -> Aceptar (descuento cupo y mensajes RabbitMQ + Kafka) -> En Bodega -> En Ruta -> Entregado")
     void testCicloCompletoEnvio() {
         // 1. Crear envio
         CrearEnvioRequest crearReq = new CrearEnvioRequest(
@@ -61,6 +67,10 @@ class EnvioIntegrationTest {
         EnvioResponse creado = envioService.crear(crearReq);
         assertNotNull(creado.id());
         assertEquals(EstadoEnvio.CREADO, creado.estado());
+
+        verify(publicadorKafkaEnvios, times(1)).publicarEvento(
+                argThat((EventoEnvioKafka e) -> e.estadoNuevo() == EstadoEnvio.CREADO && e.estadoAnterior() == null)
+        );
 
         // 2. Transicion a ACEPTADO
         doNothing().when(catalogoClient).descontarCapacidad(1L);
@@ -79,10 +89,16 @@ class EnvioIntegrationTest {
                 eq(RabbitMQConfig.ROUTING_KEY_WAREHOUSE),
                 argThat((MensajeEnvelope<?> m) -> "TICKET_BODEGA_GENERAR".equals(m.tipo()))
         );
+        verify(publicadorKafkaEnvios, times(1)).publicarEvento(
+                argThat((EventoEnvioKafka e) -> e.estadoNuevo() == EstadoEnvio.ACEPTADO && e.estadoAnterior() == EstadoEnvio.CREADO)
+        );
 
         // 3. Transicion a EN_BODEGA
         EnvioResponse enBodega = envioService.actualizarEstado(creado.id(), EstadoEnvio.EN_BODEGA);
         assertEquals(EstadoEnvio.EN_BODEGA, enBodega.estado());
+        verify(publicadorKafkaEnvios, times(1)).publicarEvento(
+                argThat((EventoEnvioKafka e) -> e.estadoNuevo() == EstadoEnvio.EN_BODEGA && e.estadoAnterior() == EstadoEnvio.ACEPTADO)
+        );
 
         // 4. Transicion a EN_RUTA
         EnvioResponse enRuta = envioService.actualizarEstado(creado.id(), EstadoEnvio.EN_RUTA);
@@ -93,6 +109,9 @@ class EnvioIntegrationTest {
                 eq(RabbitMQConfig.ROUTING_KEY_EMAIL),
                 argThat((MensajeEnvelope<?> m) -> "EMAIL_ENVIO_EN_RUTA".equals(m.tipo()))
         );
+        verify(publicadorKafkaEnvios, times(1)).publicarEvento(
+                argThat((EventoEnvioKafka e) -> e.estadoNuevo() == EstadoEnvio.EN_RUTA && e.estadoAnterior() == EstadoEnvio.EN_BODEGA)
+        );
 
         // 5. Transicion a ENTREGADO
         EnvioResponse entregado = envioService.actualizarEstado(creado.id(), EstadoEnvio.ENTREGADO);
@@ -102,6 +121,9 @@ class EnvioIntegrationTest {
                 eq(RabbitMQConfig.EXCHANGE_DIRECT),
                 eq(RabbitMQConfig.ROUTING_KEY_EMAIL),
                 argThat((MensajeEnvelope<?> m) -> "EMAIL_ENVIO_ENTREGADO".equals(m.tipo()))
+        );
+        verify(publicadorKafkaEnvios, times(1)).publicarEvento(
+                argThat((EventoEnvioKafka e) -> e.estadoNuevo() == EstadoEnvio.ENTREGADO && e.estadoAnterior() == EstadoEnvio.EN_RUTA)
         );
     }
 }
