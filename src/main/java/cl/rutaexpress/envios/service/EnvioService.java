@@ -4,6 +4,7 @@ import cl.rutaexpress.envios.client.CatalogoClient;
 import cl.rutaexpress.envios.config.RabbitMQConfig;
 import cl.rutaexpress.envios.dto.CrearEnvioRequest;
 import cl.rutaexpress.envios.dto.EnvioResponse;
+import cl.rutaexpress.envios.dto.EventoEnvioKafka;
 import cl.rutaexpress.envios.dto.MensajeEnvelope;
 import cl.rutaexpress.envios.dto.NotificacionEmailPayload;
 import cl.rutaexpress.envios.dto.TicketBodegaPayload;
@@ -11,6 +12,7 @@ import cl.rutaexpress.envios.entity.Envio;
 import cl.rutaexpress.envios.entity.EstadoEnvio;
 import cl.rutaexpress.envios.exception.EnvioNoEncontradoException;
 import cl.rutaexpress.envios.exception.TransicionEstadoInvalidaException;
+import cl.rutaexpress.envios.publisher.PublicadorKafkaEnvios;
 import cl.rutaexpress.envios.publisher.PublicadorRabbitMQ;
 import cl.rutaexpress.envios.repository.EnvioRepository;
 import org.springframework.data.jpa.domain.Specification;
@@ -27,18 +29,26 @@ public class EnvioService {
     private final EnvioRepository envioRepository;
     private final CatalogoClient catalogoClient;
     private final PublicadorRabbitMQ publicadorRabbitMQ;
+    private final PublicadorKafkaEnvios publicadorKafkaEnvios;
 
     public EnvioService(
             EnvioRepository envioRepository,
             CatalogoClient catalogoClient,
-            PublicadorRabbitMQ publicadorRabbitMQ) {
+            PublicadorRabbitMQ publicadorRabbitMQ,
+            PublicadorKafkaEnvios publicadorKafkaEnvios) {
         this.envioRepository = envioRepository;
         this.catalogoClient = catalogoClient;
         this.publicadorRabbitMQ = publicadorRabbitMQ;
+        this.publicadorKafkaEnvios = publicadorKafkaEnvios;
     }
 
     @Transactional
     public EnvioResponse crear(CrearEnvioRequest request) {
+        return crear(request, null, null);
+    }
+
+    @Transactional
+    public EnvioResponse crear(CrearEnvioRequest request, String usuarioEmail, String usuarioRol) {
 
         Envio envio = new Envio(
                 request.codigoSeguimiento(),
@@ -50,7 +60,12 @@ public class EnvioService {
                 EstadoEnvio.CREADO
         );
 
-        return EnvioResponse.fromEntity(envioRepository.save(envio));
+        Envio envioGuardado = envioRepository.save(envio);
+
+        // Publicar evento inmutable de creacion a Kafka (shipments.events)
+        publicarEventoKafka(envioGuardado, null, EstadoEnvio.CREADO, usuarioEmail, usuarioRol);
+
+        return EnvioResponse.fromEntity(envioGuardado);
     }
 
     public EnvioResponse obtenerPorId(Long id) {
@@ -75,7 +90,7 @@ public class EnvioService {
             specification = specification.and(
                     (root, query, cb) ->
                             cb.greaterThanOrEqualTo(
-                                    root.get("fechaCreacion"),
+                                     root.get("fechaCreacion"),
                                     fechaDesde
                             )
             );
@@ -99,15 +114,27 @@ public class EnvioService {
 
     @Transactional
     public EnvioResponse actualizarEstado(Long id, EstadoEnvio nuevoEstado) {
-        return actualizarEstado(id, nuevoEstado, null);
+        return actualizarEstado(id, nuevoEstado, null, null, null);
     }
 
     @Transactional
     public EnvioResponse actualizarEstado(Long id, EstadoEnvio nuevoEstado, Long servicioId) {
+        return actualizarEstado(id, nuevoEstado, servicioId, null, null);
+    }
+
+    @Transactional
+    public EnvioResponse actualizarEstado(
+            Long id,
+            EstadoEnvio nuevoEstado,
+            Long servicioId,
+            String usuarioEmail,
+            String usuarioRol) {
 
         Envio envio = buscarPorId(id);
 
         validarTransicion(envio.getEstado(), nuevoEstado);
+
+        EstadoEnvio estadoAnterior = envio.getEstado();
 
         // Si la transicion es hacia ACEPTADO, descontar capacidad vehicular en el catalogo
         if (nuevoEstado == EstadoEnvio.ACEPTADO) {
@@ -122,7 +149,27 @@ public class EnvioService {
         // Publicar eventos correspondientes a RabbitMQ
         publicarEventosRabbitMQ(envioGuardado, nuevoEstado);
 
+        // Publicar evento de dominio a Kafka (shipments.events)
+        publicarEventoKafka(envioGuardado, estadoAnterior, nuevoEstado, usuarioEmail, usuarioRol);
+
         return EnvioResponse.fromEntity(envioGuardado);
+    }
+
+    private void publicarEventoKafka(
+            Envio envio,
+            EstadoEnvio estadoAnterior,
+            EstadoEnvio estadoNuevo,
+            String usuarioEmail,
+            String usuarioRol) {
+        EventoEnvioKafka evento = EventoEnvioKafka.deTransicion(
+                envio,
+                estadoAnterior,
+                estadoNuevo,
+                usuarioEmail,
+                usuarioRol,
+                null
+        );
+        publicadorKafkaEnvios.publicarEvento(evento);
     }
 
     private void publicarEventosRabbitMQ(Envio envio, EstadoEnvio nuevoEstado) {
