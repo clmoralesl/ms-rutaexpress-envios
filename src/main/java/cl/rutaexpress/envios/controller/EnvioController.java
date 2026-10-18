@@ -73,7 +73,8 @@ public class EnvioController {
         return ResponseEntity.ok(
                 envioService.actualizarEstado(
                         id,
-                        request.estado()
+                        request.estado(),
+                        request.servicioId()
                 )
         );
     }
