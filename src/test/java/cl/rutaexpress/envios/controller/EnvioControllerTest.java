@@ -113,4 +113,13 @@ class EnvioControllerTest {
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.mensaje").value("No existe un envío con ID 999"));
     }
+
+    @Test
+    @DisplayName("POST /api/envios/{id}/etiqueta retorna 202 Accepted y solicita emision a q.cmd.label")
+    void testSolicitarEtiquetaExito() throws Exception {
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/envios/1/etiqueta"))
+                .andExpect(status().isAccepted());
+
+        org.mockito.Mockito.verify(envioService).solicitarGeneracionEtiqueta(eq(1L));
+    }
 }
