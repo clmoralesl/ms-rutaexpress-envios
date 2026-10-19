@@ -4,6 +4,7 @@ import cl.rutaexpress.envios.client.CatalogoClient;
 import cl.rutaexpress.envios.config.RabbitMQConfig;
 import cl.rutaexpress.envios.dto.CrearEnvioRequest;
 import cl.rutaexpress.envios.dto.EnvioResponse;
+import cl.rutaexpress.envios.dto.SeguimientoPublicoResponse;
 import cl.rutaexpress.envios.dto.EtiquetaPayload;
 import cl.rutaexpress.envios.dto.EventoEnvioKafka;
 import cl.rutaexpress.envios.dto.MensajeEnvelope;
@@ -69,6 +70,15 @@ public class EnvioService {
         return EnvioResponse.fromEntity(envioGuardado);
     }
 
+    public SeguimientoPublicoResponse obtenerSeguimientoPorCodigo(String codigo) {
+        Envio envio = envioRepository.findByCodigoSeguimiento(codigo)
+                .orElseThrow(() -> new org.springframework.web.server.ResponseStatusException(
+                        org.springframework.http.HttpStatus.NOT_FOUND,
+                        "No existe un envio con ese codigo de seguimiento"
+                ));
+
+        return SeguimientoPublicoResponse.fromEntity(envio);
+    }
     public EnvioResponse obtenerPorId(Long id) {
         return EnvioResponse.fromEntity(buscarPorId(id));
     }
