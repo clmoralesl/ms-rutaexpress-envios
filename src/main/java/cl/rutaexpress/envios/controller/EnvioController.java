@@ -78,4 +78,10 @@ public class EnvioController {
                 )
         );
     }
+
+    @PostMapping("/{id}/etiqueta")
+    public ResponseEntity<Void> solicitarEtiqueta(@PathVariable Long id) {
+        envioService.solicitarGeneracionEtiqueta(id);
+        return ResponseEntity.accepted().build();
+    }
 }

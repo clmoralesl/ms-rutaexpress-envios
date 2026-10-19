@@ -4,6 +4,7 @@ import cl.rutaexpress.envios.client.CatalogoClient;
 import cl.rutaexpress.envios.config.RabbitMQConfig;
 import cl.rutaexpress.envios.dto.CrearEnvioRequest;
 import cl.rutaexpress.envios.dto.EnvioResponse;
+import cl.rutaexpress.envios.dto.EtiquetaPayload;
 import cl.rutaexpress.envios.dto.EventoEnvioKafka;
 import cl.rutaexpress.envios.dto.MensajeEnvelope;
 import cl.rutaexpress.envios.dto.NotificacionEmailPayload;
@@ -155,6 +156,34 @@ public class EnvioService {
         return EnvioResponse.fromEntity(envioGuardado);
     }
 
+    @Transactional
+    public void solicitarGeneracionEtiqueta(Long id) {
+        Envio envio = buscarPorId(id);
+        String correlationId = envio.getCodigoSeguimiento();
+
+        EtiquetaPayload payloadEtiqueta = new EtiquetaPayload(
+                envio.getId(),
+                envio.getCodigoSeguimiento(),
+                envio.getRutRemitente(),
+                envio.getRutDestinatario(),
+                envio.getDireccionOrigen(),
+                envio.getDireccionDestino(),
+                envio.getPesoKg(),
+                "PDF_TERMICO_10X15",
+                LocalDateTime.now()
+        );
+        MensajeEnvelope<EtiquetaPayload> mensajeEtiqueta = MensajeEnvelope.de(
+                "ETIQUETA_ROTULADO_GENERAR",
+                correlationId,
+                payloadEtiqueta
+        );
+        publicadorRabbitMQ.publicar(
+                RabbitMQConfig.EXCHANGE_DIRECT,
+                RabbitMQConfig.ROUTING_KEY_LABEL,
+                mensajeEtiqueta
+        );
+    }
+
     private void publicarEventoKafka(
             Envio envio,
             EstadoEnvio estadoAnterior,
@@ -219,6 +248,29 @@ public class EnvioService {
                     RabbitMQConfig.EXCHANGE_DIRECT,
                     RabbitMQConfig.ROUTING_KEY_WAREHOUSE,
                     mensajeBodega
+            );
+        } else if (nuevoEstado == EstadoEnvio.EN_BODEGA) {
+            // Emision de solicitud de rotulado termico con QR hacia q.cmd.label
+            EtiquetaPayload payloadEtiqueta = new EtiquetaPayload(
+                    envio.getId(),
+                    envio.getCodigoSeguimiento(),
+                    envio.getRutRemitente(),
+                    envio.getRutDestinatario(),
+                    envio.getDireccionOrigen(),
+                    envio.getDireccionDestino(),
+                    envio.getPesoKg(),
+                    "PDF_TERMICO_10X15",
+                    LocalDateTime.now()
+            );
+            MensajeEnvelope<EtiquetaPayload> mensajeEtiqueta = MensajeEnvelope.de(
+                    "ETIQUETA_ROTULADO_GENERAR",
+                    correlationId,
+                    payloadEtiqueta
+            );
+            publicadorRabbitMQ.publicar(
+                    RabbitMQConfig.EXCHANGE_DIRECT,
+                    RabbitMQConfig.ROUTING_KEY_LABEL,
+                    mensajeEtiqueta
             );
         } else if (nuevoEstado == EstadoEnvio.EN_RUTA) {
             NotificacionEmailPayload payloadEmail = new NotificacionEmailPayload(
