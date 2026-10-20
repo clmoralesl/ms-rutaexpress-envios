@@ -18,11 +18,15 @@ import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
+import cl.rutaexpress.envios.dto.EventoSeguimientoDto;
+import cl.rutaexpress.envios.dto.SeguimientoPublicoResponse;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -121,5 +125,51 @@ class EnvioControllerTest {
                 .andExpect(status().isAccepted());
 
         org.mockito.Mockito.verify(envioService).solicitarGeneracionEtiqueta(eq(1L));
+    }
+
+    @Test
+    @DisplayName("GET /api/envios/publico/seguimiento/{codigo} retorna 200 OK con payload sanitizado")
+    void testSeguimientoPublicoExito() throws Exception {
+        LocalDateTime ahora = LocalDateTime.now();
+        SeguimientoPublicoResponse response = new SeguimientoPublicoResponse(
+                "RTX-2026-0001",
+                EstadoEnvio.EN_RUTA,
+                "Santiago",
+                "Valparaíso",
+                ahora.plusHours(24),
+                "Envío Express 24h",
+                "Flota de Distribución RutaExpress",
+                new BigDecimal("2.50"),
+                ahora,
+                ahora,
+                List.of(
+                        new EventoSeguimientoDto(EstadoEnvio.CREADO, "Envío registrado en plataforma", ahora),
+                        new EventoSeguimientoDto(EstadoEnvio.EN_RUTA, "En transporte hacia la dirección de destino", ahora)
+                )
+        );
+
+        when(envioService.obtenerSeguimientoPublico(eq("RTX-2026-0001")))
+                .thenReturn(response);
+
+        mockMvc.perform(get("/api/envios/publico/seguimiento/RTX-2026-0001"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.codigoSeguimiento").value("RTX-2026-0001"))
+                .andExpect(jsonPath("$.estadoActual").value("EN_RUTA"))
+                .andExpect(jsonPath("$.ciudadOrigen").value("Santiago"))
+                .andExpect(jsonPath("$.ciudadDestino").value("Valparaíso"))
+                .andExpect(jsonPath("$.servicioContratado").value("Envío Express 24h"))
+                .andExpect(jsonPath("$.courierAsignado").value("Flota de Distribución RutaExpress"))
+                .andExpect(jsonPath("$.historial").isArray());
+    }
+
+    @Test
+    @DisplayName("GET /api/envios/publico/seguimiento/{codigo} retorna 404 si el codigo no existe")
+    void testSeguimientoPublicoNoEncontrado() throws Exception {
+        when(envioService.obtenerSeguimientoPublico(eq("INEXISTENTE")))
+                .thenThrow(new EnvioNoEncontradoException("INEXISTENTE"));
+
+        mockMvc.perform(get("/api/envios/publico/seguimiento/INEXISTENTE"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.mensaje").value("No existe un envío con código de seguimiento INEXISTENTE"));
     }
 }

@@ -16,11 +16,14 @@ import cl.rutaexpress.envios.exception.TransicionEstadoInvalidaException;
 import cl.rutaexpress.envios.publisher.PublicadorKafkaEnvios;
 import cl.rutaexpress.envios.publisher.PublicadorRabbitMQ;
 import cl.rutaexpress.envios.repository.EnvioRepository;
+import cl.rutaexpress.envios.dto.EventoSeguimientoDto;
+import cl.rutaexpress.envios.dto.SeguimientoPublicoResponse;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
 @Service
@@ -71,6 +74,35 @@ public class EnvioService {
 
     public EnvioResponse obtenerPorId(Long id) {
         return EnvioResponse.fromEntity(buscarPorId(id));
+    }
+
+    public SeguimientoPublicoResponse obtenerSeguimientoPublico(String codigoSeguimiento) {
+        Envio envio = envioRepository.findByCodigoSeguimiento(codigoSeguimiento)
+                .orElseThrow(() -> new EnvioNoEncontradoException(codigoSeguimiento));
+
+        String ciudadOrigen = extraerCiudad(envio.getDireccionOrigen());
+        String ciudadDestino = extraerCiudad(envio.getDireccionDestino());
+        LocalDateTime fechaEstimada = (envio.getFechaCreacion() != null)
+                ? envio.getFechaCreacion().plusHours(24)
+                : LocalDateTime.now().plusHours(24);
+        String servicio = "Envío Express 24h";
+        String courier = "Flota de Distribución RutaExpress";
+
+        List<EventoSeguimientoDto> historial = construirHistorial(envio);
+
+        return new SeguimientoPublicoResponse(
+                envio.getCodigoSeguimiento(),
+                envio.getEstado(),
+                ciudadOrigen,
+                ciudadDestino,
+                fechaEstimada,
+                servicio,
+                courier,
+                envio.getPesoKg(),
+                envio.getFechaCreacion(),
+                envio.getFechaActualizacion(),
+                historial
+        );
     }
 
     public List<EnvioResponse> listar(
@@ -348,5 +380,56 @@ public class EnvioService {
                     nuevoEstado
             );
         }
+    }
+
+    private String extraerCiudad(String direccion) {
+        if (direccion == null || direccion.isBlank()) {
+            return "No especificada";
+        }
+        String[] partes = direccion.split(",");
+        if (partes.length >= 2) {
+            return partes[partes.length - 1].trim();
+        }
+        return direccion.trim();
+    }
+
+    private List<EventoSeguimientoDto> construirHistorial(Envio envio) {
+        List<EventoSeguimientoDto> eventos = new ArrayList<>();
+        LocalDateTime creacion = (envio.getFechaCreacion() != null) ? envio.getFechaCreacion() : LocalDateTime.now();
+        LocalDateTime actualizacion = (envio.getFechaActualizacion() != null) ? envio.getFechaActualizacion() : creacion;
+
+        eventos.add(new EventoSeguimientoDto(EstadoEnvio.CREADO, "Envío registrado en plataforma", creacion));
+
+        if (envio.getEstado() == EstadoEnvio.CANCELADO) {
+            eventos.add(new EventoSeguimientoDto(EstadoEnvio.CANCELADO, "Envío cancelado", actualizacion));
+            return eventos;
+        }
+
+        if (envio.getEstado() == EstadoEnvio.ACEPTADO
+                || envio.getEstado() == EstadoEnvio.EN_BODEGA
+                || envio.getEstado() == EstadoEnvio.EN_RUTA
+                || envio.getEstado() == EstadoEnvio.ENTREGADO) {
+            LocalDateTime fechaAceptado = (envio.getEstado() == EstadoEnvio.ACEPTADO) ? actualizacion : creacion.plusMinutes(45);
+            eventos.add(new EventoSeguimientoDto(EstadoEnvio.ACEPTADO, "Envío aceptado y clasificado en centro logístico", fechaAceptado));
+        }
+
+        if (envio.getEstado() == EstadoEnvio.EN_BODEGA
+                || envio.getEstado() == EstadoEnvio.EN_RUTA
+                || envio.getEstado() == EstadoEnvio.ENTREGADO) {
+            LocalDateTime fechaBodega = (envio.getEstado() == EstadoEnvio.EN_BODEGA) ? actualizacion : creacion.plusHours(2);
+            eventos.add(new EventoSeguimientoDto(EstadoEnvio.EN_BODEGA, "Recepción y rotulado de paquete en bodega central", fechaBodega));
+        }
+
+        if (envio.getEstado() == EstadoEnvio.EN_RUTA
+                || envio.getEstado() == EstadoEnvio.ENTREGADO) {
+            LocalDateTime fechaRuta = (envio.getEstado() == EstadoEnvio.EN_RUTA) ? actualizacion : creacion.plusHours(5);
+            eventos.add(new EventoSeguimientoDto(EstadoEnvio.EN_RUTA, "En transporte hacia la dirección de destino", fechaRuta));
+        }
+
+        if (envio.getEstado() == EstadoEnvio.ENTREGADO) {
+            eventos.add(new EventoSeguimientoDto(EstadoEnvio.ENTREGADO, "Paquete entregado exitosamente en destino", actualizacion));
+        }
+
+        return eventos;
     }
 }
