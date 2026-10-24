@@ -1,9 +1,6 @@
 package cl.rutaexpress.envios.controller;
 
-import cl.rutaexpress.envios.dto.ActualizarEstadoRequest;
-import cl.rutaexpress.envios.dto.CrearEnvioRequest;
-import cl.rutaexpress.envios.dto.EnvioResponse;
-import cl.rutaexpress.envios.dto.SeguimientoPublicoResponse;
+import cl.rutaexpress.envios.dto.*;
 import cl.rutaexpress.envios.entity.EstadoEnvio;
 import cl.rutaexpress.envios.service.EnvioService;
 import jakarta.validation.Valid;
@@ -92,6 +89,13 @@ public class EnvioController {
 
         return ResponseEntity.ok(
                 envioService.obtenerSeguimientoPublico(codigoSeguimiento)
+        );
+    }
+
+    @GetMapping("/geografia/regiones")
+    public ResponseEntity<List<RegionConComunasResponse>> listarCatalogoGeografico() {
+        return ResponseEntity.ok(
+                envioService.listarCatalogoGeografico()
         );
     }
 }

@@ -32,6 +32,37 @@ public record EventoEnvioKafka(
             String usuarioEmail,
             String usuarioRol,
             Map<String, Object> detallesAdicionales) {
+        String dirOrigen = componerDireccion(envio, true);
+        String dirDestino = componerDireccion(envio, false);
+        return deTransicion(envio, estadoAnterior, estadoNuevo, usuarioEmail, usuarioRol, dirOrigen, dirDestino, detallesAdicionales);
+    }
+
+    private static String componerDireccion(Envio envio, boolean esOrigen) {
+        if (envio == null) return null;
+        String calle = esOrigen ? envio.getCalleOrigen() : envio.getCalleDestino();
+        String numero = esOrigen ? envio.getNumeroOrigen() : envio.getNumeroDestino();
+        String complemento = esOrigen ? envio.getComplementoOrigen() : envio.getComplementoDestino();
+        var comuna = esOrigen ? envio.getComunaOrigen() : envio.getComunaDestino();
+
+        if (calle == null && comuna == null) return null;
+
+        String nombreComuna = comuna != null ? comuna.getNombre() : null;
+        String nombreRegion = (comuna != null && comuna.getRegion() != null) ? comuna.getRegion().getNombre() : null;
+
+        return cl.rutaexpress.envios.service.NormalizadorDireccion.componer(
+                calle, numero, complemento, nombreComuna, nombreRegion
+        );
+    }
+
+    public static EventoEnvioKafka deTransicion(
+            Envio envio,
+            EstadoEnvio estadoAnterior,
+            EstadoEnvio estadoNuevo,
+            String usuarioEmail,
+            String usuarioRol,
+            String direccionOrigenCompuesta,
+            String direccionDestinoCompuesta,
+            Map<String, Object> detallesAdicionales) {
 
         UUID id = UUID.randomUUID();
         LocalDateTime ahora = LocalDateTime.now();
@@ -41,10 +72,36 @@ public record EventoEnvioKafka(
         Map<String, Object> mapDetalles = new LinkedHashMap<>();
         if (envio != null) {
             mapDetalles.put("pesoKg", envio.getPesoKg());
-            mapDetalles.put("direccionOrigen", envio.getDireccionOrigen());
-            mapDetalles.put("direccionDestino", envio.getDireccionDestino());
             mapDetalles.put("rutRemitente", envio.getRutRemitente());
             mapDetalles.put("rutDestinatario", envio.getRutDestinatario());
+
+            // Direcciones compuestas (compatibilidad legacy)
+            mapDetalles.put("direccionOrigen", direccionOrigenCompuesta);
+            mapDetalles.put("direccionDestino", direccionDestinoCompuesta);
+
+            // Estructura normalizada de origen
+            mapDetalles.put("calleOrigen", envio.getCalleOrigen());
+            mapDetalles.put("numeroOrigen", envio.getNumeroOrigen());
+            mapDetalles.put("complementoOrigen", envio.getComplementoOrigen());
+            if (envio.getComunaOrigen() != null) {
+                mapDetalles.put("idComunaOrigen", envio.getComunaOrigen().getIdComuna());
+                mapDetalles.put("comunaOrigen", envio.getComunaOrigen().getNombre());
+                if (envio.getComunaOrigen().getRegion() != null) {
+                    mapDetalles.put("regionOrigen", envio.getComunaOrigen().getRegion().getNombre());
+                }
+            }
+
+            // Estructura normalizada de destino
+            mapDetalles.put("calleDestino", envio.getCalleDestino());
+            mapDetalles.put("numeroDestino", envio.getNumeroDestino());
+            mapDetalles.put("complementoDestino", envio.getComplementoDestino());
+            if (envio.getComunaDestino() != null) {
+                mapDetalles.put("idComunaDestino", envio.getComunaDestino().getIdComuna());
+                mapDetalles.put("comunaDestino", envio.getComunaDestino().getNombre());
+                if (envio.getComunaDestino().getRegion() != null) {
+                    mapDetalles.put("regionDestino", envio.getComunaDestino().getRegion().getNombre());
+                }
+            }
         }
         if (detallesAdicionales != null) {
             mapDetalles.putAll(detallesAdicionales);

@@ -80,14 +80,7 @@ class EnvioEndpointKafkaIntegrationTest {
 
         // 1. Crear envio via REST API con codigo unico
         String codigo = "RE-KAFKA-" + UUID.randomUUID().toString().substring(0, 8);
-        CrearEnvioRequest crearReq = new CrearEnvioRequest(
-                codigo,
-                "11223344-5",
-                "99887766-4",
-                "Av. Libertador 1234",
-                "Av. Costanera 4321",
-                new BigDecimal("7.80")
-        );
+        CrearEnvioRequest crearReq = TestEnvioFactory.crearRequestValido("11223344-5", "99887766-4", new BigDecimal("7.80"));
 
         ResponseEntity<EnvioResponse> crearRes = restTemplate.postForEntity(
                 "/api/envios",
@@ -98,9 +91,11 @@ class EnvioEndpointKafkaIntegrationTest {
         assertNotNull(crearRes.getBody());
         Long envioId = crearRes.getBody().id();
         assertNotNull(envioId);
+        String codigoGenerado = crearRes.getBody().codigoSeguimiento();
+        assertNotNull(codigoGenerado);
 
         // 2. Consumir evento de creacion desde Kafka real filtrando por codigo unico
-        List<ConsumerRecord<String, String>> recordsCreacion = esperarMensajesPorCodigo(String.valueOf(envioId), codigo, 1, Duration.ofSeconds(10));
+        List<ConsumerRecord<String, String>> recordsCreacion = esperarMensajesPorCodigo(String.valueOf(envioId), codigoGenerado, 1, Duration.ofSeconds(10));
         assertFalse(recordsCreacion.isEmpty(), "Debe haberse publicado el evento de creacion en shipments.events");
 
         ConsumerRecord<String, String> recordCreacion = recordsCreacion.get(0);
@@ -110,7 +105,7 @@ class EnvioEndpointKafkaIntegrationTest {
 
         JsonNode jsonCreacion = objectMapper.readTree(recordCreacion.value());
         assertEquals(envioId.longValue(), jsonCreacion.get("envioId").asLong());
-        assertEquals(codigo, jsonCreacion.get("codigoSeguimiento").asText());
+        assertEquals(codigoGenerado, jsonCreacion.get("codigoSeguimiento").asText());
         assertTrue(jsonCreacion.get("estadoAnterior").isNull(), "El estado anterior en creacion debe ser null");
         assertEquals("CREADO", jsonCreacion.get("estadoNuevo").asText());
         assertEquals("sistema@rutaexpress.cl", jsonCreacion.get("usuarioEmail").asText());
@@ -131,7 +126,7 @@ class EnvioEndpointKafkaIntegrationTest {
         assertEquals(HttpStatus.OK, aceptarRes.getStatusCode());
 
         // 4. Consumir el nuevo evento de transicion (ACEPTADO) desde Kafka real
-        List<ConsumerRecord<String, String>> recordsAceptado = esperarMensajesPorCodigo(String.valueOf(envioId), codigo, 1, Duration.ofSeconds(10));
+        List<ConsumerRecord<String, String>> recordsAceptado = esperarMensajesPorCodigo(String.valueOf(envioId), codigoGenerado, 1, Duration.ofSeconds(10));
         assertFalse(recordsAceptado.isEmpty(), "Debe haberse publicado el evento de ACEPTADO en shipments.events");
 
         ConsumerRecord<String, String> recordAceptado = recordsAceptado.get(0);

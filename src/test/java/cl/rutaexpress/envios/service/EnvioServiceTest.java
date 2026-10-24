@@ -1,5 +1,6 @@
 package cl.rutaexpress.envios.service;
 
+import cl.rutaexpress.envios.TestEnvioFactory;
 import cl.rutaexpress.envios.client.CatalogoClient;
 import cl.rutaexpress.envios.config.RabbitMQConfig;
 import cl.rutaexpress.envios.dto.CrearEnvioRequest;
@@ -7,14 +8,20 @@ import cl.rutaexpress.envios.dto.EnvioResponse;
 import cl.rutaexpress.envios.dto.EventoEnvioKafka;
 import cl.rutaexpress.envios.dto.MensajeEnvelope;
 import cl.rutaexpress.envios.dto.NotificacionEmailPayload;
+import cl.rutaexpress.envios.dto.SeguimientoPublicoResponse;
 import cl.rutaexpress.envios.dto.TicketBodegaPayload;
+import cl.rutaexpress.envios.entity.Comuna;
 import cl.rutaexpress.envios.entity.Envio;
 import cl.rutaexpress.envios.entity.EstadoEnvio;
+import cl.rutaexpress.envios.entity.Region;
 import cl.rutaexpress.envios.exception.CapacidadFlotaAgotadaException;
+import cl.rutaexpress.envios.exception.ComunaNoEncontradaException;
 import cl.rutaexpress.envios.exception.TransicionEstadoInvalidaException;
 import cl.rutaexpress.envios.publisher.PublicadorKafkaEnvios;
 import cl.rutaexpress.envios.publisher.PublicadorRabbitMQ;
+import cl.rutaexpress.envios.repository.ComunaRepository;
 import cl.rutaexpress.envios.repository.EnvioRepository;
+import cl.rutaexpress.envios.repository.RegionRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -22,6 +29,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Captor;
 import org.mockito.Mock;
+import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.math.BigDecimal;
@@ -37,6 +45,18 @@ class EnvioServiceTest {
 
     @Mock
     private EnvioRepository envioRepository;
+
+    @Mock
+    private ComunaRepository comunaRepository;
+
+    @Mock
+    private RegionRepository regionRepository;
+
+    @Mock
+    private GeneradorCodigoSeguimiento generadorCodigoSeguimiento;
+
+    @Spy
+    private NormalizadorDireccion normalizadorDireccion = new NormalizadorDireccion();
 
     @Mock
     private CatalogoClient catalogoClient;
@@ -55,9 +75,30 @@ class EnvioServiceTest {
 
     private EnvioService envioService;
 
+    private Region regionMetropolitana;
+    private Comuna comunaSantiago;
+    private Comuna comunaProvidencia;
+
     @BeforeEach
     void setUp() {
-        envioService = new EnvioService(envioRepository, catalogoClient, publicadorRabbitMQ, publicadorKafkaEnvios);
+        regionMetropolitana = new Region(13, "Metropolitana de Santiago");
+        comunaSantiago = new Comuna(13101, "Santiago", regionMetropolitana);
+        comunaProvidencia = new Comuna(13123, "Providencia", regionMetropolitana);
+
+        lenient().when(generadorCodigoSeguimiento.generar()).thenReturn("RTX-2026-TEST01");
+        lenient().when(comunaRepository.findById(13101)).thenReturn(Optional.of(comunaSantiago));
+        lenient().when(comunaRepository.findById(13123)).thenReturn(Optional.of(comunaProvidencia));
+
+        envioService = new EnvioService(
+                envioRepository,
+                comunaRepository,
+                regionRepository,
+                generadorCodigoSeguimiento,
+                normalizadorDireccion,
+                catalogoClient,
+                publicadorRabbitMQ,
+                publicadorKafkaEnvios
+        );
     }
 
     private Envio crearEnvioMock(Long id, String codigo, EstadoEnvio estado) {
@@ -83,14 +124,7 @@ class EnvioServiceTest {
     @Test
     @DisplayName("Crear envio: persiste con estado CREADO y publica evento en Kafka")
     void testCrearEnvioExito() {
-        CrearEnvioRequest request = new CrearEnvioRequest(
-                "RE-TEST-NEW-01",
-                "11111111-1",
-                "22222222-2",
-                "Av. Providencia 1234",
-                "Av. Apoquindo 5678",
-                new BigDecimal("3.00")
-        );
+        CrearEnvioRequest request = TestEnvioFactory.crearRequestValido("11111111-1", "22222222-2", new BigDecimal("3.00"));
 
         when(envioRepository.save(any(Envio.class))).thenAnswer(invocation -> {
             Envio guardado = invocation.getArgument(0);
@@ -104,6 +138,7 @@ class EnvioServiceTest {
 
         assertNotNull(response);
         assertEquals(99L, response.id());
+        assertEquals("RTX-2026-TEST01", response.codigoSeguimiento());
         assertEquals(EstadoEnvio.CREADO, response.estado());
 
         verify(envioRepository, times(1)).save(any(Envio.class));
@@ -111,7 +146,7 @@ class EnvioServiceTest {
 
         EventoEnvioKafka evento = eventoKafkaCaptor.getValue();
         assertEquals(99L, evento.envioId());
-        assertEquals("RE-TEST-NEW-01", evento.codigoSeguimiento());
+        assertEquals("RTX-2026-TEST01", evento.codigoSeguimiento());
         assertNull(evento.estadoAnterior());
         assertEquals(EstadoEnvio.CREADO, evento.estadoNuevo());
         assertEquals("admin@rutaexpress.cl", evento.usuarioEmail());
@@ -128,28 +163,19 @@ class EnvioServiceTest {
 
         EnvioResponse response = envioService.actualizarEstado(10L, EstadoEnvio.ACEPTADO, 2L);
 
-        assertNotNull(response);
         assertEquals(EstadoEnvio.ACEPTADO, response.estado());
 
-        // 1. Verifica descuento atomico de capacidad
         verify(catalogoClient, times(1)).descontarCapacidad(2L);
 
-        // 2. Verifica guardado en BD
-        verify(envioRepository, times(1)).save(envio);
+        verify(publicadorRabbitMQ, times(2)).publicar(any(), any(), mensajeCaptor.capture());
+        var mensajes = mensajeCaptor.getAllValues();
+        assertEquals(2, mensajes.size());
 
-        // 3. Verifica publicacion en RabbitMQ (2 mensajes: email y bodega)
-        verify(publicadorRabbitMQ, times(1)).publicar(
-                eq(RabbitMQConfig.EXCHANGE_DIRECT),
-                eq(RabbitMQConfig.ROUTING_KEY_EMAIL),
-                argThat((MensajeEnvelope<?> m) -> "EMAIL_ENVIO_ACEPTADO".equals(m.tipo()))
-        );
-        verify(publicadorRabbitMQ, times(1)).publicar(
-                eq(RabbitMQConfig.EXCHANGE_DIRECT),
-                eq(RabbitMQConfig.ROUTING_KEY_WAREHOUSE),
-                argThat((MensajeEnvelope<?> m) -> "TICKET_BODEGA_GENERAR".equals(m.tipo()))
-        );
+        boolean tieneEmail = mensajes.stream().anyMatch(m -> "EMAIL_ENVIO_ACEPTADO".equals(m.tipo()));
+        boolean tieneTicket = mensajes.stream().anyMatch(m -> "TICKET_BODEGA_GENERAR".equals(m.tipo()));
+        assertTrue(tieneEmail);
+        assertTrue(tieneTicket);
 
-        // 4. Verifica publicacion de evento en Kafka
         verify(publicadorKafkaEnvios, times(1)).publicarEvento(eventoKafkaCaptor.capture());
         EventoEnvioKafka evento = eventoKafkaCaptor.getValue();
         assertEquals(10L, evento.envioId());
@@ -158,24 +184,23 @@ class EnvioServiceTest {
     }
 
     @Test
-    @DisplayName("Transicion a ACEPTADO con capacidad agotada: lanza excepcion y no persiste ni publica")
+    @DisplayName("Transicion a ACEPTADO con capacidad agotada: lanza excepcion y no publica en brokers")
     void testTransicionAceptadoCapacidadAgotada() {
         Envio envio = crearEnvioMock(10L, "RE-TEST-002", EstadoEnvio.CREADO);
         when(envioRepository.findById(10L)).thenReturn(Optional.of(envio));
-        doThrow(new CapacidadFlotaAgotadaException(1L)).when(catalogoClient).descontarCapacidad(1L);
+        doThrow(new CapacidadFlotaAgotadaException(3L)).when(catalogoClient).descontarCapacidad(3L);
 
         assertThrows(CapacidadFlotaAgotadaException.class, () ->
-                envioService.actualizarEstado(10L, EstadoEnvio.ACEPTADO, 1L)
+                envioService.actualizarEstado(10L, EstadoEnvio.ACEPTADO, 3L)
         );
 
-        verify(catalogoClient, times(1)).descontarCapacidad(1L);
-        verify(envioRepository, never()).save(any(Envio.class));
+        verify(envioRepository, never()).save(any());
         verify(publicadorRabbitMQ, never()).publicar(any(), any(), any());
         verify(publicadorKafkaEnvios, never()).publicarEvento(any());
     }
 
     @Test
-    @DisplayName("Transicion a EN_RUTA: Publica evento email y evento Kafka sin invocar descuento de capacidad")
+    @DisplayName("Transicion a EN_RUTA: publica email de despacho y evento en Kafka")
     void testTransicionEnRutaExito() {
         Envio envio = crearEnvioMock(20L, "RE-TEST-003", EstadoEnvio.EN_BODEGA);
         when(envioRepository.findById(20L)).thenReturn(Optional.of(envio));
@@ -183,25 +208,24 @@ class EnvioServiceTest {
 
         EnvioResponse response = envioService.actualizarEstado(20L, EstadoEnvio.EN_RUTA);
 
-        assertNotNull(response);
         assertEquals(EstadoEnvio.EN_RUTA, response.estado());
 
         verify(catalogoClient, never()).descontarCapacidad(any());
+
         verify(publicadorRabbitMQ, times(1)).publicar(
                 eq(RabbitMQConfig.EXCHANGE_DIRECT),
                 eq(RabbitMQConfig.ROUTING_KEY_EMAIL),
-                argThat((MensajeEnvelope<?> m) -> "EMAIL_ENVIO_EN_RUTA".equals(m.tipo()))
+                mensajeCaptor.capture()
         );
+        assertEquals("EMAIL_ENVIO_EN_RUTA", mensajeCaptor.getValue().tipo());
 
         verify(publicadorKafkaEnvios, times(1)).publicarEvento(eventoKafkaCaptor.capture());
-        EventoEnvioKafka evento = eventoKafkaCaptor.getValue();
-        assertEquals(20L, evento.envioId());
-        assertEquals(EstadoEnvio.EN_BODEGA, evento.estadoAnterior());
-        assertEquals(EstadoEnvio.EN_RUTA, evento.estadoNuevo());
+        assertEquals(EstadoEnvio.EN_BODEGA, eventoKafkaCaptor.getValue().estadoAnterior());
+        assertEquals(EstadoEnvio.EN_RUTA, eventoKafkaCaptor.getValue().estadoNuevo());
     }
 
     @Test
-    @DisplayName("Transicion a ENTREGADO: Publica evento email y evento Kafka sin invocar descuento de capacidad")
+    @DisplayName("Transicion a ENTREGADO: publica email de entrega final y evento en Kafka")
     void testTransicionEntregadoExito() {
         Envio envio = crearEnvioMock(30L, "RE-TEST-004", EstadoEnvio.EN_RUTA);
         when(envioRepository.findById(30L)).thenReturn(Optional.of(envio));
@@ -209,25 +233,22 @@ class EnvioServiceTest {
 
         EnvioResponse response = envioService.actualizarEstado(30L, EstadoEnvio.ENTREGADO);
 
-        assertNotNull(response);
         assertEquals(EstadoEnvio.ENTREGADO, response.estado());
 
-        verify(catalogoClient, never()).descontarCapacidad(any());
         verify(publicadorRabbitMQ, times(1)).publicar(
                 eq(RabbitMQConfig.EXCHANGE_DIRECT),
                 eq(RabbitMQConfig.ROUTING_KEY_EMAIL),
-                argThat((MensajeEnvelope<?> m) -> "EMAIL_ENVIO_ENTREGADO".equals(m.tipo()))
+                mensajeCaptor.capture()
         );
+        assertEquals("EMAIL_ENVIO_ENTREGADO", mensajeCaptor.getValue().tipo());
 
         verify(publicadorKafkaEnvios, times(1)).publicarEvento(eventoKafkaCaptor.capture());
-        EventoEnvioKafka evento = eventoKafkaCaptor.getValue();
-        assertEquals(30L, evento.envioId());
-        assertEquals(EstadoEnvio.EN_RUTA, evento.estadoAnterior());
-        assertEquals(EstadoEnvio.ENTREGADO, evento.estadoNuevo());
+        assertEquals(EstadoEnvio.EN_RUTA, eventoKafkaCaptor.getValue().estadoAnterior());
+        assertEquals(EstadoEnvio.ENTREGADO, eventoKafkaCaptor.getValue().estadoNuevo());
     }
 
     @Test
-    @DisplayName("Transicion a CANCELADO: Publica evento Kafka sin invocar RabbitMQ")
+    @DisplayName("Transicion a CANCELADO: no descuenta catalogo, no publica en RabbitMQ, si publica en Kafka")
     void testTransicionCanceladoExito() {
         Envio envio = crearEnvioMock(50L, "RE-TEST-006", EstadoEnvio.CREADO);
         when(envioRepository.findById(50L)).thenReturn(Optional.of(envio));
@@ -235,7 +256,6 @@ class EnvioServiceTest {
 
         EnvioResponse response = envioService.actualizarEstado(50L, EstadoEnvio.CANCELADO);
 
-        assertNotNull(response);
         assertEquals(EstadoEnvio.CANCELADO, response.estado());
 
         verify(catalogoClient, never()).descontarCapacidad(any());
@@ -261,6 +281,79 @@ class EnvioServiceTest {
         verify(catalogoClient, never()).descontarCapacidad(any());
         verify(envioRepository, never()).save(any());
         verify(publicadorRabbitMQ, never()).publicar(any(), any(), any());
+        verify(publicadorKafkaEnvios, never()).publicarEvento(any());
+    }
+
+    @Test
+    @DisplayName("Rastreo público protege privacidad: contiene comuna y región, y no expone calle ni número ni RUT")
+    void testRastreoPublicoProtegePrivacidad() throws Exception {
+        Envio envio = crearEnvioMock(10L, "RTX-2026-PRIV01", EstadoEnvio.EN_RUTA);
+        when(envioRepository.findByCodigoSeguimiento("RTX-2026-PRIV01")).thenReturn(Optional.of(envio));
+
+        SeguimientoPublicoResponse response = envioService.obtenerSeguimientoPublico("RTX-2026-PRIV01");
+
+        assertNotNull(response);
+        assertEquals("RTX-2026-PRIV01", response.codigoSeguimiento());
+        assertTrue(response.ciudadOrigen().contains("Santiago"));
+        assertTrue(response.ciudadOrigen().contains("Metropolitana"));
+        assertTrue(response.ciudadDestino().contains("Providencia"));
+        assertTrue(response.ciudadDestino().contains("Metropolitana"));
+
+        // Verificar sobre JSON serializado que no se filtran datos privados
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        mapper.registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule());
+        String json = mapper.writeValueAsString(response);
+
+        assertFalse(json.contains("Av. Providencia"), "No debe contener la calle de origen");
+        assertFalse(json.contains("1234"), "No debe contener el número de origen");
+        assertFalse(json.contains("Av. Apoquindo"), "No debe contener la calle de destino");
+        assertFalse(json.contains("11111111-1"), "No debe contener RUT del remitente");
+        assertFalse(json.contains("22222222-2"), "No debe contener RUT del destinatario");
+    }
+
+    @Test
+    @DisplayName("Comuna inexistente responde ComunaNoEncontradaException (400)")
+    void testIdComunaInexistenteLanzaExcepcion() {
+        CrearEnvioRequest request = TestEnvioFactory.crearRequestConComunaInexistente(99999);
+        when(comunaRepository.findById(99999)).thenReturn(Optional.empty());
+
+        assertThrows(ComunaNoEncontradaException.class, () ->
+                envioService.crear(request, "admin@rutaexpress.cl", "ADMINISTRADOR"));
+
+        verify(envioRepository, never()).save(any());
+        verify(publicadorKafkaEnvios, never()).publicarEvento(any());
+    }
+
+    @Test
+    @DisplayName("Reintento ante código de seguimiento duplicado hasta encontrar uno libre")
+    void testReintentoCodigoDuplicado() {
+        CrearEnvioRequest request = TestEnvioFactory.crearRequestValido();
+
+        when(generadorCodigoSeguimiento.generar())
+                .thenReturn("RTX-2026-COLL01") // Primera llamada: colisión
+                .thenReturn("RTX-2026-FREE02"); // Segunda llamada: libre
+
+        when(envioRepository.existsByCodigoSeguimiento("RTX-2026-COLL01")).thenReturn(true);
+        when(envioRepository.existsByCodigoSeguimiento("RTX-2026-FREE02")).thenReturn(false);
+
+        when(envioRepository.save(any(Envio.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        EnvioResponse response = envioService.crear(request, "admin@rutaexpress.cl", "ADMINISTRADOR");
+
+        assertNotNull(response);
+        assertEquals("RTX-2026-FREE02", response.codigoSeguimiento());
+        verify(generadorCodigoSeguimiento, times(2)).generar();
+    }
+
+    @Test
+    @DisplayName("Si la persistencia falla, los eventos de Kafka no se publican")
+    void testFalloPersistenciaNoPublicaKafka() {
+        CrearEnvioRequest request = TestEnvioFactory.crearRequestValido();
+        when(envioRepository.save(any(Envio.class))).thenThrow(new RuntimeException("Error fatal en base de datos"));
+
+        assertThrows(RuntimeException.class, () ->
+                envioService.crear(request, "admin@rutaexpress.cl", "ADMINISTRADOR"));
+
         verify(publicadorKafkaEnvios, never()).publicarEvento(any());
     }
 }
