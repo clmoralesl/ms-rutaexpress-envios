@@ -2,25 +2,24 @@ package cl.rutaexpress.envios.service;
 
 import cl.rutaexpress.envios.client.CatalogoClient;
 import cl.rutaexpress.envios.config.RabbitMQConfig;
-import cl.rutaexpress.envios.dto.CrearEnvioRequest;
-import cl.rutaexpress.envios.dto.EnvioResponse;
-import cl.rutaexpress.envios.dto.EtiquetaPayload;
-import cl.rutaexpress.envios.dto.EventoEnvioKafka;
-import cl.rutaexpress.envios.dto.MensajeEnvelope;
-import cl.rutaexpress.envios.dto.NotificacionEmailPayload;
-import cl.rutaexpress.envios.dto.TicketBodegaPayload;
+import cl.rutaexpress.envios.dto.*;
+import cl.rutaexpress.envios.entity.Comuna;
 import cl.rutaexpress.envios.entity.Envio;
 import cl.rutaexpress.envios.entity.EstadoEnvio;
+import cl.rutaexpress.envios.entity.Region;
+import cl.rutaexpress.envios.exception.ComunaNoEncontradaException;
 import cl.rutaexpress.envios.exception.EnvioNoEncontradoException;
 import cl.rutaexpress.envios.exception.TransicionEstadoInvalidaException;
 import cl.rutaexpress.envios.publisher.PublicadorKafkaEnvios;
 import cl.rutaexpress.envios.publisher.PublicadorRabbitMQ;
+import cl.rutaexpress.envios.repository.ComunaRepository;
 import cl.rutaexpress.envios.repository.EnvioRepository;
-import cl.rutaexpress.envios.dto.EventoSeguimientoDto;
-import cl.rutaexpress.envios.dto.SeguimientoPublicoResponse;
+import cl.rutaexpress.envios.repository.RegionRepository;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -30,17 +29,31 @@ import java.util.List;
 @Transactional(readOnly = true)
 public class EnvioService {
 
+    private static final int MAX_INTENTOS_CODIGO = 5;
+
     private final EnvioRepository envioRepository;
+    private final ComunaRepository comunaRepository;
+    private final RegionRepository regionRepository;
+    private final GeneradorCodigoSeguimiento generadorCodigoSeguimiento;
+    private final NormalizadorDireccion normalizadorDireccion;
     private final CatalogoClient catalogoClient;
     private final PublicadorRabbitMQ publicadorRabbitMQ;
     private final PublicadorKafkaEnvios publicadorKafkaEnvios;
 
     public EnvioService(
             EnvioRepository envioRepository,
+            ComunaRepository comunaRepository,
+            RegionRepository regionRepository,
+            GeneradorCodigoSeguimiento generadorCodigoSeguimiento,
+            NormalizadorDireccion normalizadorDireccion,
             CatalogoClient catalogoClient,
             PublicadorRabbitMQ publicadorRabbitMQ,
             PublicadorKafkaEnvios publicadorKafkaEnvios) {
         this.envioRepository = envioRepository;
+        this.comunaRepository = comunaRepository;
+        this.regionRepository = regionRepository;
+        this.generadorCodigoSeguimiento = generadorCodigoSeguimiento;
+        this.normalizadorDireccion = normalizadorDireccion;
         this.catalogoClient = catalogoClient;
         this.publicadorRabbitMQ = publicadorRabbitMQ;
         this.publicadorKafkaEnvios = publicadorKafkaEnvios;
@@ -54,34 +67,89 @@ public class EnvioService {
     @Transactional
     public EnvioResponse crear(CrearEnvioRequest request, String usuarioEmail, String usuarioRol) {
 
+        // 1. Resolver y validar existencia de Comunas en el catalogo CUT
+        Comuna comunaOrigen = comunaRepository.findById(request.origen().idComuna())
+                .orElseThrow(() -> new ComunaNoEncontradaException(request.origen().idComuna()));
+
+        Comuna comunaDestino = comunaRepository.findById(request.destino().idComuna())
+                .orElseThrow(() -> new ComunaNoEncontradaException(request.destino().idComuna()));
+
+        // 2. Normalizar campos textuales (NFC, espacios, caracteres seguros, numero S/N)
+        String calleOrigen = normalizadorDireccion.normalizarTexto(request.origen().calle(), "calleOrigen", true, 120);
+        String numeroOrigen = normalizadorDireccion.normalizarNumero(request.origen().numero(), "numeroOrigen");
+        String complementoOrigen = normalizadorDireccion.normalizarTexto(request.origen().complemento(), "complementoOrigen", false, 80);
+
+        String calleDestino = normalizadorDireccion.normalizarTexto(request.destino().calle(), "calleDestino", true, 120);
+        String numeroDestino = normalizadorDireccion.normalizarNumero(request.destino().numero(), "numeroDestino");
+        String complementoDestino = normalizadorDireccion.normalizarTexto(request.destino().complemento(), "complementoDestino", false, 80);
+
+        // 3. Generar codigo de seguimiento institucional unico (ignora cualquier valor enviado por el cliente)
+        String codigoSeguimiento = generarCodigoUnicoConReintentos();
+
+        // 4. Construir direcciones compuestas legadas para eventos y vistas
+        String dirOrigenCompuesta = NormalizadorDireccion.componer(
+                calleOrigen, numeroOrigen, complementoOrigen,
+                comunaOrigen.getNombre(), comunaOrigen.getRegion().getNombre()
+        );
+        String dirDestinoCompuesta = NormalizadorDireccion.componer(
+                calleDestino, numeroDestino, complementoDestino,
+                comunaDestino.getNombre(), comunaDestino.getRegion().getNombre()
+        );
+
+        // 5. Persistir entidad con estructura normalizada 3FN
         Envio envio = new Envio(
-                request.codigoSeguimiento(),
+                codigoSeguimiento,
                 request.rutRemitente(),
                 request.rutDestinatario(),
-                request.direccionOrigen(),
-                request.direccionDestino(),
+                calleOrigen,
+                numeroOrigen,
+                complementoOrigen,
+                comunaOrigen,
+                calleDestino,
+                numeroDestino,
+                complementoDestino,
+                comunaDestino,
                 request.pesoKg(),
                 EstadoEnvio.CREADO
         );
 
         Envio envioGuardado = envioRepository.save(envio);
 
-        // Publicar evento inmutable de creacion a Kafka (shipments.events)
-        publicarEventoKafka(envioGuardado, null, EstadoEnvio.CREADO, usuarioEmail, usuarioRol);
+        // 6. Publicacion de eventos post-commit para garantizar consistencia transaccional
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    publicarEventoKafka(envioGuardado, null, EstadoEnvio.CREADO, usuarioEmail, usuarioRol, dirOrigenCompuesta, dirDestinoCompuesta);
+                }
+            });
+        } else {
+            publicarEventoKafka(envioGuardado, null, EstadoEnvio.CREADO, usuarioEmail, usuarioRol, dirOrigenCompuesta, dirDestinoCompuesta);
+        }
 
-        return EnvioResponse.fromEntity(envioGuardado);
+        return EnvioResponse.fromEntity(envioGuardado, dirOrigenCompuesta, dirDestinoCompuesta);
     }
 
     public EnvioResponse obtenerPorId(Long id) {
-        return EnvioResponse.fromEntity(buscarPorId(id));
+        Envio envio = buscarPorId(id);
+        String dirOrigen = obtenerDireccionOrigenCompuesta(envio);
+        String dirDestino = obtenerDireccionDestinoCompuesta(envio);
+        return EnvioResponse.fromEntity(envio, dirOrigen, dirDestino);
     }
 
     public SeguimientoPublicoResponse obtenerSeguimientoPublico(String codigoSeguimiento) {
         Envio envio = envioRepository.findByCodigoSeguimiento(codigoSeguimiento)
                 .orElseThrow(() -> new EnvioNoEncontradoException(codigoSeguimiento));
 
-        String ciudadOrigen = extraerCiudad(envio.getDireccionOrigen());
-        String ciudadDestino = extraerCiudad(envio.getDireccionDestino());
+        // El rastreo publico solo expone Comuna y Region, protegiendo calle y numero (privacidad)
+        String ciudadOrigen = (envio.getComunaOrigen() != null)
+                ? envio.getComunaOrigen().getNombre() + ", " + envio.getComunaOrigen().getRegion().getNombre()
+                : "No especificada";
+
+        String ciudadDestino = (envio.getComunaDestino() != null)
+                ? envio.getComunaDestino().getNombre() + ", " + envio.getComunaDestino().getRegion().getNombre()
+                : "No especificada";
+
         LocalDateTime fechaEstimada = (envio.getFechaCreacion() != null)
                 ? envio.getFechaCreacion().plusHours(24)
                 : LocalDateTime.now().plusHours(24);
@@ -123,7 +191,7 @@ public class EnvioService {
             specification = specification.and(
                     (root, query, cb) ->
                             cb.greaterThanOrEqualTo(
-                                     root.get("fechaCreacion"),
+                                    root.get("fechaCreacion"),
                                     fechaDesde
                             )
             );
@@ -141,7 +209,11 @@ public class EnvioService {
 
         return envioRepository.findAll(specification)
                 .stream()
-                .map(EnvioResponse::fromEntity)
+                .map(e -> EnvioResponse.fromEntity(
+                        e,
+                        obtenerDireccionOrigenCompuesta(e),
+                        obtenerDireccionDestinoCompuesta(e)
+                ))
                 .toList();
     }
 
@@ -179,31 +251,55 @@ public class EnvioService {
 
         Envio envioGuardado = envioRepository.save(envio);
 
-        // Publicar eventos correspondientes a RabbitMQ
-        publicarEventosRabbitMQ(envioGuardado, nuevoEstado);
+        String dirOrigen = obtenerDireccionOrigenCompuesta(envioGuardado);
+        String dirDestino = obtenerDireccionDestinoCompuesta(envioGuardado);
 
-        // Publicar evento de dominio a Kafka (shipments.events)
-        publicarEventoKafka(envioGuardado, estadoAnterior, nuevoEstado, usuarioEmail, usuarioRol);
+        // Publicacion post-commit
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    publicarEventosRabbitMQ(envioGuardado, nuevoEstado, dirOrigen, dirDestino);
+                    publicarEventoKafka(envioGuardado, estadoAnterior, nuevoEstado, usuarioEmail, usuarioRol, dirOrigen, dirDestino);
+                }
+            });
+        } else {
+            publicarEventosRabbitMQ(envioGuardado, nuevoEstado, dirOrigen, dirDestino);
+            publicarEventoKafka(envioGuardado, estadoAnterior, nuevoEstado, usuarioEmail, usuarioRol, dirOrigen, dirDestino);
+        }
 
-        return EnvioResponse.fromEntity(envioGuardado);
+        return EnvioResponse.fromEntity(envioGuardado, dirOrigen, dirDestino);
     }
 
     @Transactional
     public void solicitarGeneracionEtiqueta(Long id) {
         Envio envio = buscarPorId(id);
         String correlationId = envio.getCodigoSeguimiento();
+        String dirOrigen = obtenerDireccionOrigenCompuesta(envio);
+        String dirDestino = obtenerDireccionDestinoCompuesta(envio);
 
         EtiquetaPayload payloadEtiqueta = new EtiquetaPayload(
                 envio.getId(),
                 envio.getCodigoSeguimiento(),
                 envio.getRutRemitente(),
                 envio.getRutDestinatario(),
-                envio.getDireccionOrigen(),
-                envio.getDireccionDestino(),
+                dirOrigen,
+                dirDestino,
                 envio.getPesoKg(),
                 "PDF_TERMICO_10X15",
-                LocalDateTime.now()
+                LocalDateTime.now(),
+                envio.getCalleOrigen(),
+                envio.getNumeroOrigen(),
+                envio.getComplementoOrigen(),
+                envio.getComunaOrigen() != null ? envio.getComunaOrigen().getNombre() : null,
+                (envio.getComunaOrigen() != null && envio.getComunaOrigen().getRegion() != null) ? envio.getComunaOrigen().getRegion().getNombre() : null,
+                envio.getCalleDestino(),
+                envio.getNumeroDestino(),
+                envio.getComplementoDestino(),
+                envio.getComunaDestino() != null ? envio.getComunaDestino().getNombre() : null,
+                (envio.getComunaDestino() != null && envio.getComunaDestino().getRegion() != null) ? envio.getComunaDestino().getRegion().getNombre() : null
         );
+
         MensajeEnvelope<EtiquetaPayload> mensajeEtiqueta = MensajeEnvelope.de(
                 "ETIQUETA_ROTULADO_GENERAR",
                 correlationId,
@@ -216,25 +312,86 @@ public class EnvioService {
         );
     }
 
+    public List<RegionConComunasResponse> listarCatalogoGeografico() {
+        List<Region> regiones = regionRepository.findAllByOrderByIdRegionAsc();
+        return regiones.stream()
+                .map(r -> new RegionConComunasResponse(
+                        r.getIdRegion(),
+                        r.getNombre(),
+                        r.getComunas().stream()
+                                .map(c -> new RegionConComunasResponse.ComunaItemResponse(
+                                        c.getIdComuna(),
+                                        c.getNombre()
+                                ))
+                                .toList()
+                ))
+                .toList();
+    }
+
+    private String generarCodigoUnicoConReintentos() {
+        for (int intento = 0; intento < MAX_INTENTOS_CODIGO; intento++) {
+            String codigo = generadorCodigoSeguimiento.generar();
+            if (!envioRepository.existsByCodigoSeguimiento(codigo)) {
+                return codigo;
+            }
+        }
+        throw new IllegalStateException("No fue posible generar un código de seguimiento único tras " + MAX_INTENTOS_CODIGO + " reintentos");
+    }
+
+    private String obtenerDireccionOrigenCompuesta(Envio envio) {
+        String comuna = (envio.getComunaOrigen() != null) ? envio.getComunaOrigen().getNombre() : "";
+        String region = (envio.getComunaOrigen() != null && envio.getComunaOrigen().getRegion() != null)
+                ? envio.getComunaOrigen().getRegion().getNombre() : "";
+        return NormalizadorDireccion.componer(
+                envio.getCalleOrigen(),
+                envio.getNumeroOrigen(),
+                envio.getComplementoOrigen(),
+                comuna,
+                region
+        );
+    }
+
+    private String obtenerDireccionDestinoCompuesta(Envio envio) {
+        String comuna = (envio.getComunaDestino() != null) ? envio.getComunaDestino().getNombre() : "";
+        String region = (envio.getComunaDestino() != null && envio.getComunaDestino().getRegion() != null)
+                ? envio.getComunaDestino().getRegion().getNombre() : "";
+        return NormalizadorDireccion.componer(
+                envio.getCalleDestino(),
+                envio.getNumeroDestino(),
+                envio.getComplementoDestino(),
+                comuna,
+                region
+        );
+    }
+
     private void publicarEventoKafka(
             Envio envio,
             EstadoEnvio estadoAnterior,
             EstadoEnvio estadoNuevo,
             String usuarioEmail,
-            String usuarioRol) {
+            String usuarioRol,
+            String dirOrigen,
+            String dirDestino) {
         EventoEnvioKafka evento = EventoEnvioKafka.deTransicion(
                 envio,
                 estadoAnterior,
                 estadoNuevo,
                 usuarioEmail,
                 usuarioRol,
+                dirOrigen,
+                dirDestino,
                 null
         );
         publicadorKafkaEnvios.publicarEvento(evento);
     }
 
-    private void publicarEventosRabbitMQ(Envio envio, EstadoEnvio nuevoEstado) {
+    private void publicarEventosRabbitMQ(Envio envio, EstadoEnvio nuevoEstado, String dirOrigen, String dirDestino) {
         String correlationId = envio.getCodigoSeguimiento();
+
+        String comDestino = (envio.getComunaDestino() != null) ? envio.getComunaDestino().getNombre() : null;
+        String regDestino = (envio.getComunaDestino() != null && envio.getComunaDestino().getRegion() != null) ? envio.getComunaDestino().getRegion().getNombre() : null;
+        String comOrigen = (envio.getComunaOrigen() != null) ? envio.getComunaOrigen().getNombre() : null;
+        String regOrigen = (envio.getComunaOrigen() != null && envio.getComunaOrigen().getRegion() != null) ? envio.getComunaOrigen().getRegion().getNombre() : null;
 
         if (nuevoEstado == EstadoEnvio.ACEPTADO) {
             // 1. Mensaje de notificacion por email
@@ -259,17 +416,27 @@ public class EnvioService {
                     mensajeEmail
             );
 
-            // 2. Mensaje para ticket de picking en bodega
+            // 2. Mensaje para ticket de picking en bodega con datos estructurados
             TicketBodegaPayload payloadBodega = new TicketBodegaPayload(
                     envio.getId(),
                     envio.getCodigoSeguimiento(),
                     envio.getRutRemitente(),
                     envio.getRutDestinatario(),
-                    envio.getDireccionOrigen(),
-                    envio.getDireccionDestino(),
+                    dirOrigen,
+                    dirDestino,
                     envio.getPesoKg(),
                     LocalDateTime.now(),
-                    "Generar ticket de picking y rotulado para recepcion en bodega"
+                    "Generar ticket de picking y rotulado para recepcion en bodega",
+                    envio.getCalleOrigen(),
+                    envio.getNumeroOrigen(),
+                    envio.getComplementoOrigen(),
+                    comOrigen,
+                    regOrigen,
+                    envio.getCalleDestino(),
+                    envio.getNumeroDestino(),
+                    envio.getComplementoDestino(),
+                    comDestino,
+                    regDestino
             );
             MensajeEnvelope<TicketBodegaPayload> mensajeBodega = MensajeEnvelope.de(
                     "TICKET_BODEGA_GENERAR",
@@ -282,17 +449,26 @@ public class EnvioService {
                     mensajeBodega
             );
         } else if (nuevoEstado == EstadoEnvio.EN_BODEGA) {
-            // Emision de solicitud de rotulado termico con QR hacia q.cmd.label
             EtiquetaPayload payloadEtiqueta = new EtiquetaPayload(
                     envio.getId(),
                     envio.getCodigoSeguimiento(),
                     envio.getRutRemitente(),
                     envio.getRutDestinatario(),
-                    envio.getDireccionOrigen(),
-                    envio.getDireccionDestino(),
+                    dirOrigen,
+                    dirDestino,
                     envio.getPesoKg(),
                     "PDF_TERMICO_10X15",
-                    LocalDateTime.now()
+                    LocalDateTime.now(),
+                    envio.getCalleOrigen(),
+                    envio.getNumeroOrigen(),
+                    envio.getComplementoOrigen(),
+                    comOrigen,
+                    regOrigen,
+                    envio.getCalleDestino(),
+                    envio.getNumeroDestino(),
+                    envio.getComplementoDestino(),
+                    comDestino,
+                    regDestino
             );
             MensajeEnvelope<EtiquetaPayload> mensajeEtiqueta = MensajeEnvelope.de(
                     "ETIQUETA_ROTULADO_GENERAR",
@@ -380,17 +556,6 @@ public class EnvioService {
                     nuevoEstado
             );
         }
-    }
-
-    private String extraerCiudad(String direccion) {
-        if (direccion == null || direccion.isBlank()) {
-            return "No especificada";
-        }
-        String[] partes = direccion.split(",");
-        if (partes.length >= 2) {
-            return partes[partes.length - 1].trim();
-        }
-        return direccion.trim();
     }
 
     private List<EventoSeguimientoDto> construirHistorial(Envio envio) {

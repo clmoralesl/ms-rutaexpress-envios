@@ -11,6 +11,7 @@ import cl.rutaexpress.envios.publisher.PublicadorKafkaEnvios;
 import cl.rutaexpress.envios.publisher.PublicadorRabbitMQ;
 import cl.rutaexpress.envios.repository.EnvioRepository;
 import cl.rutaexpress.envios.service.EnvioService;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -29,7 +30,6 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 @SpringBootTest
-@Transactional
 class EnvioIntegrationTest {
 
     @Autowired
@@ -52,18 +52,16 @@ class EnvioIntegrationTest {
         envioRepository.deleteAll();
     }
 
+    @AfterEach
+    void tearDown() {
+        envioRepository.deleteAll();
+    }
+
     @Test
     @DisplayName("Ciclo completo E2E: Crear -> Aceptar (descuento cupo y mensajes RabbitMQ + Kafka) -> En Bodega -> En Ruta -> Entregado")
     void testCicloCompletoEnvio() {
         // 1. Crear envio
-        CrearEnvioRequest crearReq = new CrearEnvioRequest(
-                "RE-INTEG-001",
-                "15555666-7",
-                "18888999-0",
-                "Av. Alameda 100",
-                "Av. Vitacura 500",
-                new BigDecimal("4.20")
-        );
+        CrearEnvioRequest crearReq = TestEnvioFactory.crearRequestValido("15555666-7", "18888999-0", new BigDecimal("4.20"));
         EnvioResponse creado = envioService.crear(crearReq);
         assertNotNull(creado.id());
         assertEquals(EstadoEnvio.CREADO, creado.estado());

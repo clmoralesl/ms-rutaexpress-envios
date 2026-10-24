@@ -53,14 +53,7 @@ class EnvioEndpointRabbitMQIntegrationTest {
     @DisplayName("Endpoint Real: Crear envio, avanzar a ACEPTADO y validar recepcion real en RabbitMQ")
     void testFlujoCompletoConRabbitMQReal() {
         // 1. Crear envio via POST /api/envios
-        CrearEnvioRequest crearReq = new CrearEnvioRequest(
-                "RE-LIVE-001",
-                "12345678-5",
-                "98765432-1",
-                "Santiago Centro 100",
-                "Las Condes 200",
-                new BigDecimal("3.50")
-        );
+        CrearEnvioRequest crearReq = TestEnvioFactory.crearRequestValido("12345678-5", "98765432-1", new BigDecimal("3.50"));
 
         ResponseEntity<EnvioResponse> crearResp = restTemplate.postForEntity(
                 "/api/envios",
@@ -135,14 +128,7 @@ class EnvioEndpointRabbitMQIntegrationTest {
     @DisplayName("Endpoint Real: Respuesta 409 Conflict cuando catalogo rechaza por capacidad agotada")
     void testRechazoPorCapacidadAgotadaEndpoint() {
         // Crear envio
-        CrearEnvioRequest crearReq = new CrearEnvioRequest(
-                "RE-LIVE-002",
-                "12345678-5",
-                "98765432-1",
-                "Origen Prueba",
-                "Destino Prueba",
-                new BigDecimal("1.50")
-        );
+        CrearEnvioRequest crearReq = TestEnvioFactory.crearRequestValido("12345678-5", "98765432-1", new BigDecimal("1.50"));
         ResponseEntity<EnvioResponse> crearResp = restTemplate.postForEntity("/api/envios", crearReq, EnvioResponse.class);
         Long envioId = crearResp.getBody().id();
 
@@ -170,14 +156,7 @@ class EnvioEndpointRabbitMQIntegrationTest {
     @Test
     @DisplayName("Endpoint Real: Respuesta 400 Bad Request en transicion invalida")
     void testTransicionInvalidaEndpoint() {
-        CrearEnvioRequest crearReq = new CrearEnvioRequest(
-                "RE-LIVE-003",
-                "12345678-5",
-                "98765432-1",
-                "Origen Prueba",
-                "Destino Prueba",
-                new BigDecimal("2.00")
-        );
+        CrearEnvioRequest crearReq = TestEnvioFactory.crearRequestValido("12345678-5", "98765432-1", new BigDecimal("2.00"));
         ResponseEntity<EnvioResponse> crearResp = restTemplate.postForEntity("/api/envios", crearReq, EnvioResponse.class);
         Long envioId = crearResp.getBody().id();
 
