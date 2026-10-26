@@ -7,6 +7,7 @@ import cl.rutaexpress.envios.entity.Comuna;
 import cl.rutaexpress.envios.entity.Envio;
 import cl.rutaexpress.envios.entity.EstadoEnvio;
 import cl.rutaexpress.envios.entity.Region;
+import cl.rutaexpress.envios.exception.AccesoDenegadoException;
 import cl.rutaexpress.envios.exception.ComunaNoEncontradaException;
 import cl.rutaexpress.envios.exception.EnvioNoEncontradoException;
 import cl.rutaexpress.envios.exception.TransicionEstadoInvalidaException;
@@ -15,6 +16,9 @@ import cl.rutaexpress.envios.publisher.PublicadorRabbitMQ;
 import cl.rutaexpress.envios.repository.ComunaRepository;
 import cl.rutaexpress.envios.repository.EnvioRepository;
 import cl.rutaexpress.envios.repository.RegionRepository;
+import cl.rutaexpress.envios.security.PoliticaAcceso;
+import cl.rutaexpress.envios.security.UsuarioActual;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -24,6 +28,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 @Service
 @Transactional(readOnly = true)
@@ -39,6 +44,29 @@ public class EnvioService {
     private final CatalogoClient catalogoClient;
     private final PublicadorRabbitMQ publicadorRabbitMQ;
     private final PublicadorKafkaEnvios publicadorKafkaEnvios;
+    private final PoliticaAcceso politicaAcceso;
+
+    @Autowired
+    public EnvioService(
+            EnvioRepository envioRepository,
+            ComunaRepository comunaRepository,
+            RegionRepository regionRepository,
+            GeneradorCodigoSeguimiento generadorCodigoSeguimiento,
+            NormalizadorDireccion normalizadorDireccion,
+            CatalogoClient catalogoClient,
+            PublicadorRabbitMQ publicadorRabbitMQ,
+            PublicadorKafkaEnvios publicadorKafkaEnvios,
+            PoliticaAcceso politicaAcceso) {
+        this.envioRepository = envioRepository;
+        this.comunaRepository = comunaRepository;
+        this.regionRepository = regionRepository;
+        this.generadorCodigoSeguimiento = generadorCodigoSeguimiento;
+        this.normalizadorDireccion = normalizadorDireccion;
+        this.catalogoClient = catalogoClient;
+        this.publicadorRabbitMQ = publicadorRabbitMQ;
+        this.publicadorKafkaEnvios = publicadorKafkaEnvios;
+        this.politicaAcceso = politicaAcceso;
+    }
 
     public EnvioService(
             EnvioRepository envioRepository,
@@ -49,23 +77,25 @@ public class EnvioService {
             CatalogoClient catalogoClient,
             PublicadorRabbitMQ publicadorRabbitMQ,
             PublicadorKafkaEnvios publicadorKafkaEnvios) {
-        this.envioRepository = envioRepository;
-        this.comunaRepository = comunaRepository;
-        this.regionRepository = regionRepository;
-        this.generadorCodigoSeguimiento = generadorCodigoSeguimiento;
-        this.normalizadorDireccion = normalizadorDireccion;
-        this.catalogoClient = catalogoClient;
-        this.publicadorRabbitMQ = publicadorRabbitMQ;
-        this.publicadorKafkaEnvios = publicadorKafkaEnvios;
+        this(
+                envioRepository,
+                comunaRepository,
+                regionRepository,
+                generadorCodigoSeguimiento,
+                normalizadorDireccion,
+                catalogoClient,
+                publicadorRabbitMQ,
+                publicadorKafkaEnvios,
+                new PoliticaAcceso()
+        );
     }
 
     @Transactional
-    public EnvioResponse crear(CrearEnvioRequest request) {
-        return crear(request, null, null);
-    }
-
-    @Transactional
-    public EnvioResponse crear(CrearEnvioRequest request, String usuarioEmail, String usuarioRol) {
+    public EnvioResponse crear(CrearEnvioRequest request, UsuarioActual usuario) {
+        if (usuario == null) {
+            throw new AccesoDenegadoException("Identidad de usuario requerida");
+        }
+        politicaAcceso.validarPuedeCrear(usuario);
 
         // 1. Resolver y validar existencia de Comunas en el catalogo CUT
         Comuna comunaOrigen = comunaRepository.findById(request.origen().idComuna())
@@ -96,7 +126,7 @@ public class EnvioService {
                 comunaDestino.getNombre(), comunaDestino.getRegion().getNombre()
         );
 
-        // 5. Persistir entidad con estructura normalizada 3FN
+        // 5. Persistir entidad con estructura normalizada 3FN y propietario
         Envio envio = new Envio(
                 codigoSeguimiento,
                 request.rutRemitente(),
@@ -113,9 +143,16 @@ public class EnvioService {
                 EstadoEnvio.CREADO
         );
 
+        envio.setCreadoPorOid(usuario.oid());
+        envio.setCreadoPorEmail(usuario.email());
+
         Envio envioGuardado = envioRepository.save(envio);
 
-        // 6. Publicacion de eventos post-commit para garantizar consistencia transaccional
+        String usuarioEmail = usuario.email();
+        String usuarioRol = (usuario.roles() != null && !usuario.roles().isEmpty())
+                ? String.join(",", usuario.roles()) : null;
+
+        // 6. Publicacion de eventos post-commit para garantizar consistencia transaccional con usuario real
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override
@@ -130,8 +167,20 @@ public class EnvioService {
         return EnvioResponse.fromEntity(envioGuardado, dirOrigenCompuesta, dirDestinoCompuesta);
     }
 
-    public EnvioResponse obtenerPorId(Long id) {
+    public EnvioResponse obtenerPorId(Long id, UsuarioActual usuario) {
+        if (usuario == null) {
+            throw new AccesoDenegadoException("Identidad de usuario requerida");
+        }
+        politicaAcceso.validarPuedeListar(usuario);
+
         Envio envio = buscarPorId(id);
+
+        if (!politicaAcceso.puedeVerTodos(usuario)) {
+            if (envio.getCreadoPorOid() == null || !envio.getCreadoPorOid().equals(usuario.oid())) {
+                throw new AccesoDenegadoException("No tiene acceso a este envío");
+            }
+        }
+
         String dirOrigen = obtenerDireccionOrigenCompuesta(envio);
         String dirDestino = obtenerDireccionDestinoCompuesta(envio);
         return EnvioResponse.fromEntity(envio, dirOrigen, dirDestino);
@@ -141,7 +190,6 @@ public class EnvioService {
         Envio envio = envioRepository.findByCodigoSeguimiento(codigoSeguimiento)
                 .orElseThrow(() -> new EnvioNoEncontradoException(codigoSeguimiento));
 
-        // El rastreo publico solo expone Comuna y Region, protegiendo calle y numero (privacidad)
         String ciudadOrigen = (envio.getComunaOrigen() != null)
                 ? envio.getComunaOrigen().getNombre() + ", " + envio.getComunaOrigen().getRegion().getNombre()
                 : "No especificada";
@@ -176,7 +224,13 @@ public class EnvioService {
     public List<EnvioResponse> listar(
             EstadoEnvio estado,
             LocalDateTime fechaDesde,
-            LocalDateTime fechaHasta) {
+            LocalDateTime fechaHasta,
+            UsuarioActual usuario) {
+
+        if (usuario == null) {
+            throw new AccesoDenegadoException("Identidad de usuario requerida");
+        }
+        politicaAcceso.validarPuedeListar(usuario);
 
         Specification<Envio> specification = Specification.where(null);
 
@@ -207,6 +261,14 @@ public class EnvioService {
             );
         }
 
+        // Filtro por propietario a nivel de consulta SQL (D1, D3, D5)
+        if (!politicaAcceso.puedeVerTodos(usuario)) {
+            specification = specification.and(
+                    (root, query, cb) ->
+                            cb.equal(root.get("creadoPorOid"), usuario.oid())
+            );
+        }
+
         return envioRepository.findAll(specification)
                 .stream()
                 .map(e -> EnvioResponse.fromEntity(
@@ -218,17 +280,30 @@ public class EnvioService {
     }
 
     @Transactional
-    public EnvioResponse actualizarEstado(Long id, EstadoEnvio nuevoEstado) {
-        return actualizarEstado(id, nuevoEstado, null, null, null);
-    }
-
-    @Transactional
-    public EnvioResponse actualizarEstado(Long id, EstadoEnvio nuevoEstado, Long servicioId) {
-        return actualizarEstado(id, nuevoEstado, servicioId, null, null);
+    public EnvioResponse actualizarEstado(Long id, EstadoEnvio nuevoEstado, UsuarioActual usuario) {
+        return actualizarEstado(id, nuevoEstado, null, usuario);
     }
 
     @Transactional
     public EnvioResponse actualizarEstado(
+            Long id,
+            EstadoEnvio nuevoEstado,
+            Long servicioId,
+            UsuarioActual usuario) {
+
+        if (usuario == null) {
+            throw new AccesoDenegadoException("Identidad de usuario requerida");
+        }
+        politicaAcceso.validarPuedeGestionar(usuario);
+
+        String usuarioEmail = usuario.email();
+        String usuarioRol = (usuario.roles() != null && !usuario.roles().isEmpty())
+                ? String.join(",", usuario.roles()) : null;
+
+        return actualizarEstadoInterno(id, nuevoEstado, servicioId, usuarioEmail, usuarioRol);
+    }
+
+    private EnvioResponse actualizarEstadoInterno(
             Long id,
             EstadoEnvio nuevoEstado,
             Long servicioId,
@@ -272,7 +347,12 @@ public class EnvioService {
     }
 
     @Transactional
-    public void solicitarGeneracionEtiqueta(Long id) {
+    public void solicitarGeneracionEtiqueta(Long id, UsuarioActual usuario) {
+        if (usuario == null) {
+            throw new AccesoDenegadoException("Identidad de usuario requerida");
+        }
+        politicaAcceso.validarPuedeSolicitarEtiqueta(usuario);
+
         Envio envio = buscarPorId(id);
         String correlationId = envio.getCodigoSeguimiento();
         String dirOrigen = obtenerDireccionOrigenCompuesta(envio);
@@ -320,8 +400,8 @@ public class EnvioService {
                         r.getNombre(),
                         r.getComunas().stream()
                                 .map(c -> new RegionConComunasResponse.ComunaItemResponse(
-                                        c.getIdComuna(),
-                                        c.getNombre()
+                                         c.getIdComuna(),
+                                         c.getNombre()
                                 ))
                                 .toList()
                 ))

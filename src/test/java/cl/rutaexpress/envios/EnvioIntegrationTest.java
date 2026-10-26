@@ -11,6 +11,7 @@ import cl.rutaexpress.envios.publisher.PublicadorKafkaEnvios;
 import cl.rutaexpress.envios.publisher.PublicadorRabbitMQ;
 import cl.rutaexpress.envios.repository.EnvioRepository;
 import cl.rutaexpress.envios.service.EnvioService;
+import cl.rutaexpress.envios.testutil.UsuariosPrueba;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -62,7 +63,7 @@ class EnvioIntegrationTest {
     void testCicloCompletoEnvio() {
         // 1. Crear envio
         CrearEnvioRequest crearReq = TestEnvioFactory.crearRequestValido("15555666-7", "18888999-0", new BigDecimal("4.20"));
-        EnvioResponse creado = envioService.crear(crearReq);
+        EnvioResponse creado = envioService.crear(crearReq, UsuariosPrueba.admin());
         assertNotNull(creado.id());
         assertEquals(EstadoEnvio.CREADO, creado.estado());
 
@@ -73,7 +74,7 @@ class EnvioIntegrationTest {
         // 2. Transicion a ACEPTADO
         doNothing().when(catalogoClient).descontarCapacidad(1L);
 
-        EnvioResponse aceptado = envioService.actualizarEstado(creado.id(), EstadoEnvio.ACEPTADO, 1L);
+        EnvioResponse aceptado = envioService.actualizarEstado(creado.id(), EstadoEnvio.ACEPTADO, 1L, UsuariosPrueba.admin());
         assertEquals(EstadoEnvio.ACEPTADO, aceptado.estado());
 
         verify(catalogoClient, times(1)).descontarCapacidad(1L);
@@ -92,14 +93,14 @@ class EnvioIntegrationTest {
         );
 
         // 3. Transicion a EN_BODEGA
-        EnvioResponse enBodega = envioService.actualizarEstado(creado.id(), EstadoEnvio.EN_BODEGA);
+        EnvioResponse enBodega = envioService.actualizarEstado(creado.id(), EstadoEnvio.EN_BODEGA, UsuariosPrueba.admin());
         assertEquals(EstadoEnvio.EN_BODEGA, enBodega.estado());
         verify(publicadorKafkaEnvios, times(1)).publicarEvento(
                 argThat((EventoEnvioKafka e) -> e.estadoNuevo() == EstadoEnvio.EN_BODEGA && e.estadoAnterior() == EstadoEnvio.ACEPTADO)
         );
 
         // 4. Transicion a EN_RUTA
-        EnvioResponse enRuta = envioService.actualizarEstado(creado.id(), EstadoEnvio.EN_RUTA);
+        EnvioResponse enRuta = envioService.actualizarEstado(creado.id(), EstadoEnvio.EN_RUTA, UsuariosPrueba.admin());
         assertEquals(EstadoEnvio.EN_RUTA, enRuta.estado());
 
         verify(publicadorRabbitMQ, times(1)).publicar(
@@ -112,7 +113,7 @@ class EnvioIntegrationTest {
         );
 
         // 5. Transicion a ENTREGADO
-        EnvioResponse entregado = envioService.actualizarEstado(creado.id(), EstadoEnvio.ENTREGADO);
+        EnvioResponse entregado = envioService.actualizarEstado(creado.id(), EstadoEnvio.ENTREGADO, UsuariosPrueba.admin());
         assertEquals(EstadoEnvio.ENTREGADO, entregado.estado());
 
         verify(publicadorRabbitMQ, times(1)).publicar(

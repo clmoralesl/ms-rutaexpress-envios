@@ -56,6 +56,12 @@ public class Envio {
     @Column(name = "estado", nullable = false, length = 30)
     private EstadoEnvio estado;
 
+    @Column(name = "creado_por_oid", length = 36, updatable = false)
+    private String creadoPorOid;
+
+    @Column(name = "creado_por_email", length = 320, updatable = false)
+    private String creadoPorEmail;
+
     @Column(name = "fecha_creacion", nullable = false)
     private LocalDateTime fechaCreacion;
 
@@ -195,6 +201,22 @@ public class Envio {
 
     public EstadoEnvio getEstado() {
         return estado;
+    }
+
+    public String getCreadoPorOid() {
+        return creadoPorOid;
+    }
+
+    public void setCreadoPorOid(String creadoPorOid) {
+        this.creadoPorOid = creadoPorOid;
+    }
+
+    public String getCreadoPorEmail() {
+        return creadoPorEmail;
+    }
+
+    public void setCreadoPorEmail(String creadoPorEmail) {
+        this.creadoPorEmail = creadoPorEmail;
     }
 
     public LocalDateTime getFechaCreacion() {

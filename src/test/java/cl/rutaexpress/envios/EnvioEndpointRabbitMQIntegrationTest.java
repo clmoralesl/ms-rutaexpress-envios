@@ -10,6 +10,7 @@ import cl.rutaexpress.envios.entity.EstadoEnvio;
 import cl.rutaexpress.envios.exception.CapacidadFlotaAgotadaException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -21,15 +22,31 @@ import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+/**
+ * Prueba de integración con brokers reales (RabbitMQ y Kafka). Requiere Docker levantado, contenedor de notificaciones apagado y perfil -Pintegracion-externa.
+ */
+@Tag("integracion-externa")
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class EnvioEndpointRabbitMQIntegrationTest {
+
+    private static final String TOPICO_PRUEBA = "test.shipments.events." + UUID.randomUUID();
+
+    @DynamicPropertySource
+    static void propiedadesBrokerReal(DynamicPropertyRegistry registry) {
+        registry.add("spring.kafka.bootstrap-servers", () -> "localhost:9092");
+        registry.add("kafka.topic.shipments-events", () -> TOPICO_PRUEBA);
+    }
 
     @Autowired
     private TestRestTemplate restTemplate;
@@ -47,6 +64,14 @@ class EnvioEndpointRabbitMQIntegrationTest {
             while (rabbitTemplate.receive(RabbitMQConfig.QUEUE_EMAIL, 100) != null) {}
             while (rabbitTemplate.receive(RabbitMQConfig.QUEUE_WAREHOUSE, 100) != null) {}
         } catch (Exception ignored) {}
+
+        restTemplate.getRestTemplate().setInterceptors(List.of((request, body, execution) -> {
+            request.getHeaders().add("X-Servicio-Interno", "test-secreto-interno-envios-seguro-32caracteres");
+            request.getHeaders().add("X-Usuario-Oid", "oid-admin-test");
+            request.getHeaders().add("X-Usuario-Email", "admin@rutaexpress.cl");
+            request.getHeaders().add("X-Usuario-Roles", "ADMIN");
+            return execution.execute(request, body);
+        }));
     }
 
     @Test

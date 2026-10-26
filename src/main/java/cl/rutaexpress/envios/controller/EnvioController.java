@@ -2,6 +2,7 @@ package cl.rutaexpress.envios.controller;
 
 import cl.rutaexpress.envios.dto.*;
 import cl.rutaexpress.envios.entity.EstadoEnvio;
+import cl.rutaexpress.envios.security.UsuarioActual;
 import cl.rutaexpress.envios.service.EnvioService;
 import jakarta.validation.Valid;
 import org.springframework.format.annotation.DateTimeFormat;
@@ -24,9 +25,10 @@ public class EnvioController {
 
     @PostMapping
     public ResponseEntity<EnvioResponse> crear(
-            @Valid @RequestBody CrearEnvioRequest request) {
+            @Valid @RequestBody CrearEnvioRequest request,
+            UsuarioActual usuario) {
 
-        EnvioResponse response = envioService.crear(request);
+        EnvioResponse response = envioService.crear(request, usuario);
 
         return ResponseEntity
                 .status(HttpStatus.CREATED)
@@ -35,30 +37,31 @@ public class EnvioController {
 
     @GetMapping("/{id}")
     public ResponseEntity<EnvioResponse> obtenerPorId(
-            @PathVariable Long id) {
+            @PathVariable Long id,
+            UsuarioActual usuario) {
 
         return ResponseEntity.ok(
-                envioService.obtenerPorId(id)
+                envioService.obtenerPorId(id, usuario)
         );
     }
 
     @GetMapping
     public ResponseEntity<List<EnvioResponse>> listar(
             @RequestParam(required = false) EstadoEnvio estado,
-
             @RequestParam(required = false)
             @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME)
             LocalDateTime fechaDesde,
-
             @RequestParam(required = false)
             @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME)
-            LocalDateTime fechaHasta) {
+            LocalDateTime fechaHasta,
+            UsuarioActual usuario) {
 
         return ResponseEntity.ok(
                 envioService.listar(
                         estado,
                         fechaDesde,
-                        fechaHasta
+                        fechaHasta,
+                        usuario
                 )
         );
     }
@@ -66,20 +69,24 @@ public class EnvioController {
     @PutMapping("/{id}/estado")
     public ResponseEntity<EnvioResponse> actualizarEstado(
             @PathVariable Long id,
-            @Valid @RequestBody ActualizarEstadoRequest request) {
+            @Valid @RequestBody ActualizarEstadoRequest request,
+            UsuarioActual usuario) {
 
         return ResponseEntity.ok(
                 envioService.actualizarEstado(
                         id,
                         request.estado(),
-                        request.servicioId()
+                        request.servicioId(),
+                        usuario
                 )
         );
     }
 
     @PostMapping("/{id}/etiqueta")
-    public ResponseEntity<Void> solicitarEtiqueta(@PathVariable Long id) {
-        envioService.solicitarGeneracionEtiqueta(id);
+    public ResponseEntity<Void> solicitarEtiqueta(
+            @PathVariable Long id,
+            UsuarioActual usuario) {
+        envioService.solicitarGeneracionEtiqueta(id, usuario);
         return ResponseEntity.accepted().build();
     }
 

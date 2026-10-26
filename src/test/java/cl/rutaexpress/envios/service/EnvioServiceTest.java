@@ -22,6 +22,7 @@ import cl.rutaexpress.envios.publisher.PublicadorRabbitMQ;
 import cl.rutaexpress.envios.repository.ComunaRepository;
 import cl.rutaexpress.envios.repository.EnvioRepository;
 import cl.rutaexpress.envios.repository.RegionRepository;
+import cl.rutaexpress.envios.testutil.UsuariosPrueba;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -134,7 +135,7 @@ class EnvioServiceTest {
             return guardado;
         });
 
-        EnvioResponse response = envioService.crear(request, "admin@rutaexpress.cl", "ADMINISTRADOR");
+        EnvioResponse response = envioService.crear(request, UsuariosPrueba.admin());
 
         assertNotNull(response);
         assertEquals(99L, response.id());
@@ -150,7 +151,7 @@ class EnvioServiceTest {
         assertNull(evento.estadoAnterior());
         assertEquals(EstadoEnvio.CREADO, evento.estadoNuevo());
         assertEquals("admin@rutaexpress.cl", evento.usuarioEmail());
-        assertEquals("ADMINISTRADOR", evento.usuarioRol());
+        assertEquals("ADMIN", evento.usuarioRol());
         assertEquals(new BigDecimal("3.00"), evento.detalles().get("pesoKg"));
     }
 
@@ -161,7 +162,7 @@ class EnvioServiceTest {
         when(envioRepository.findById(10L)).thenReturn(Optional.of(envio));
         when(envioRepository.save(any(Envio.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
-        EnvioResponse response = envioService.actualizarEstado(10L, EstadoEnvio.ACEPTADO, 2L);
+        EnvioResponse response = envioService.actualizarEstado(10L, EstadoEnvio.ACEPTADO, 2L, UsuariosPrueba.admin());
 
         assertEquals(EstadoEnvio.ACEPTADO, response.estado());
 
@@ -191,7 +192,7 @@ class EnvioServiceTest {
         doThrow(new CapacidadFlotaAgotadaException(3L)).when(catalogoClient).descontarCapacidad(3L);
 
         assertThrows(CapacidadFlotaAgotadaException.class, () ->
-                envioService.actualizarEstado(10L, EstadoEnvio.ACEPTADO, 3L)
+                envioService.actualizarEstado(10L, EstadoEnvio.ACEPTADO, 3L, UsuariosPrueba.admin())
         );
 
         verify(envioRepository, never()).save(any());
@@ -206,7 +207,7 @@ class EnvioServiceTest {
         when(envioRepository.findById(20L)).thenReturn(Optional.of(envio));
         when(envioRepository.save(any(Envio.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
-        EnvioResponse response = envioService.actualizarEstado(20L, EstadoEnvio.EN_RUTA);
+        EnvioResponse response = envioService.actualizarEstado(20L, EstadoEnvio.EN_RUTA, UsuariosPrueba.admin());
 
         assertEquals(EstadoEnvio.EN_RUTA, response.estado());
 
@@ -231,7 +232,7 @@ class EnvioServiceTest {
         when(envioRepository.findById(30L)).thenReturn(Optional.of(envio));
         when(envioRepository.save(any(Envio.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
-        EnvioResponse response = envioService.actualizarEstado(30L, EstadoEnvio.ENTREGADO);
+        EnvioResponse response = envioService.actualizarEstado(30L, EstadoEnvio.ENTREGADO, UsuariosPrueba.admin());
 
         assertEquals(EstadoEnvio.ENTREGADO, response.estado());
 
@@ -254,7 +255,7 @@ class EnvioServiceTest {
         when(envioRepository.findById(50L)).thenReturn(Optional.of(envio));
         when(envioRepository.save(any(Envio.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
-        EnvioResponse response = envioService.actualizarEstado(50L, EstadoEnvio.CANCELADO);
+        EnvioResponse response = envioService.actualizarEstado(50L, EstadoEnvio.CANCELADO, UsuariosPrueba.admin());
 
         assertEquals(EstadoEnvio.CANCELADO, response.estado());
 
@@ -275,7 +276,7 @@ class EnvioServiceTest {
         when(envioRepository.findById(40L)).thenReturn(Optional.of(envio));
 
         assertThrows(TransicionEstadoInvalidaException.class, () ->
-                envioService.actualizarEstado(40L, EstadoEnvio.EN_RUTA)
+                envioService.actualizarEstado(40L, EstadoEnvio.EN_RUTA, UsuariosPrueba.admin())
         );
 
         verify(catalogoClient, never()).descontarCapacidad(any());
@@ -318,7 +319,7 @@ class EnvioServiceTest {
         when(comunaRepository.findById(99999)).thenReturn(Optional.empty());
 
         assertThrows(ComunaNoEncontradaException.class, () ->
-                envioService.crear(request, "admin@rutaexpress.cl", "ADMINISTRADOR"));
+                envioService.crear(request, UsuariosPrueba.admin()));
 
         verify(envioRepository, never()).save(any());
         verify(publicadorKafkaEnvios, never()).publicarEvento(any());
@@ -338,7 +339,7 @@ class EnvioServiceTest {
 
         when(envioRepository.save(any(Envio.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
-        EnvioResponse response = envioService.crear(request, "admin@rutaexpress.cl", "ADMINISTRADOR");
+        EnvioResponse response = envioService.crear(request, UsuariosPrueba.admin());
 
         assertNotNull(response);
         assertEquals("RTX-2026-FREE02", response.codigoSeguimiento());
@@ -352,7 +353,7 @@ class EnvioServiceTest {
         when(envioRepository.save(any(Envio.class))).thenThrow(new RuntimeException("Error fatal en base de datos"));
 
         assertThrows(RuntimeException.class, () ->
-                envioService.crear(request, "admin@rutaexpress.cl", "ADMINISTRADOR"));
+                envioService.crear(request, UsuariosPrueba.admin()));
 
         verify(publicadorKafkaEnvios, never()).publicarEvento(any());
     }

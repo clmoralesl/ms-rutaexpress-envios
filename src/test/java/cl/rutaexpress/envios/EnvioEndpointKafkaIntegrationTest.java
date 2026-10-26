@@ -1,22 +1,25 @@
 package cl.rutaexpress.envios;
 
 import cl.rutaexpress.envios.client.CatalogoClient;
-import cl.rutaexpress.envios.config.KafkaConfig;
 import cl.rutaexpress.envios.dto.ActualizarEstadoRequest;
 import cl.rutaexpress.envios.dto.CrearEnvioRequest;
 import cl.rutaexpress.envios.dto.EnvioResponse;
 import cl.rutaexpress.envios.entity.EstadoEnvio;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
-import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -26,16 +29,39 @@ import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.doNothing;
 
+/**
+ * Prueba de integración con broker Kafka real. Requiere Docker levantado y perfil -Pintegracion-externa.
+ */
+@Tag("integracion-externa")
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class EnvioEndpointKafkaIntegrationTest {
+
+    private static final String TOPICO_PRUEBA = "test.shipments.events." + UUID.randomUUID();
+
+    @DynamicPropertySource
+    static void propiedadesBrokerReal(DynamicPropertyRegistry registry) {
+        registry.add("spring.kafka.bootstrap-servers", () -> "localhost:9092");
+        registry.add("kafka.topic.shipments-events", () -> TOPICO_PRUEBA);
+    }
+
+    @BeforeAll
+    static void inicializarTopicoPrueba() {
+        try (AdminClient admin = AdminClient.create(Map.of(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092"))) {
+            admin.createTopics(List.of(new NewTopic(TOPICO_PRUEBA, 3, (short) 1))).all().get(10, TimeUnit.SECONDS);
+        } catch (Exception ignored) {
+        }
+    }
 
     @Autowired
     private TestRestTemplate restTemplate;
@@ -58,12 +84,15 @@ class EnvioEndpointKafkaIntegrationTest {
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
 
         testConsumer = new KafkaConsumer<>(props);
-        List<TopicPartition> particiones = List.of(
-                new TopicPartition(KafkaConfig.TOPICO_SHIPMENTS_EVENTS, 0),
-                new TopicPartition(KafkaConfig.TOPICO_SHIPMENTS_EVENTS, 1),
-                new TopicPartition(KafkaConfig.TOPICO_SHIPMENTS_EVENTS, 2)
-        );
-        testConsumer.assign(particiones);
+        testConsumer.subscribe(List.of(TOPICO_PRUEBA));
+
+        restTemplate.getRestTemplate().setInterceptors(List.of((request, body, execution) -> {
+            request.getHeaders().add("X-Servicio-Interno", "test-secreto-interno-envios-seguro-32caracteres");
+            request.getHeaders().add("X-Usuario-Oid", "oid-admin-test");
+            request.getHeaders().add("X-Usuario-Email", "admin@rutaexpress.cl");
+            request.getHeaders().add("X-Usuario-Roles", "ADMIN");
+            return execution.execute(request, body);
+        }));
     }
 
     @AfterEach
@@ -74,7 +103,7 @@ class EnvioEndpointKafkaIntegrationTest {
     }
 
     @Test
-    @DisplayName("Validacion contra Cluster Kafka Real: Envio a shipments.events con particionamiento por clave")
+    @DisplayName("Validacion contra Cluster Kafka Real: Envio a topico aislado con particionamiento por clave")
     void testPublicacionHaciaClusterKafkaReal() throws Exception {
         doNothing().when(catalogoClient).descontarCapacidad(1L);
 
@@ -96,11 +125,11 @@ class EnvioEndpointKafkaIntegrationTest {
 
         // 2. Consumir evento de creacion desde Kafka real filtrando por codigo unico
         List<ConsumerRecord<String, String>> recordsCreacion = esperarMensajesPorCodigo(String.valueOf(envioId), codigoGenerado, 1, Duration.ofSeconds(10));
-        assertFalse(recordsCreacion.isEmpty(), "Debe haberse publicado el evento de creacion en shipments.events");
+        assertFalse(recordsCreacion.isEmpty(), "Debe haberse publicado el evento de creacion en el topico de prueba aislado");
 
         ConsumerRecord<String, String> recordCreacion = recordsCreacion.get(0);
         assertEquals(String.valueOf(envioId), recordCreacion.key(), "La clave en Kafka debe ser envioId.toString()");
-        assertEquals(KafkaConfig.TOPICO_SHIPMENTS_EVENTS, recordCreacion.topic());
+        assertEquals(TOPICO_PRUEBA, recordCreacion.topic());
         assertTrue(recordCreacion.partition() >= 0 && recordCreacion.partition() < 3, "La particion debe estar en el rango [0, 2]");
 
         JsonNode jsonCreacion = objectMapper.readTree(recordCreacion.value());
@@ -108,8 +137,8 @@ class EnvioEndpointKafkaIntegrationTest {
         assertEquals(codigoGenerado, jsonCreacion.get("codigoSeguimiento").asText());
         assertTrue(jsonCreacion.get("estadoAnterior").isNull(), "El estado anterior en creacion debe ser null");
         assertEquals("CREADO", jsonCreacion.get("estadoNuevo").asText());
-        assertEquals("sistema@rutaexpress.cl", jsonCreacion.get("usuarioEmail").asText());
-        assertEquals("SISTEMA", jsonCreacion.get("usuarioRol").asText());
+        assertEquals("admin@rutaexpress.cl", jsonCreacion.get("usuarioEmail").asText());
+        assertEquals("ADMIN", jsonCreacion.get("usuarioRol").asText());
         assertNotNull(jsonCreacion.get("eventoId").asText());
         assertNotNull(jsonCreacion.get("timestamp").asText());
 
@@ -127,7 +156,7 @@ class EnvioEndpointKafkaIntegrationTest {
 
         // 4. Consumir el nuevo evento de transicion (ACEPTADO) desde Kafka real
         List<ConsumerRecord<String, String>> recordsAceptado = esperarMensajesPorCodigo(String.valueOf(envioId), codigoGenerado, 1, Duration.ofSeconds(10));
-        assertFalse(recordsAceptado.isEmpty(), "Debe haberse publicado el evento de ACEPTADO en shipments.events");
+        assertFalse(recordsAceptado.isEmpty(), "Debe haberse publicado el evento de ACEPTADO en el topico de prueba aislado");
 
         ConsumerRecord<String, String> recordAceptado = recordsAceptado.get(0);
         assertEquals(String.valueOf(envioId), recordAceptado.key());
