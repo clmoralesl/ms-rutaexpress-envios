@@ -17,9 +17,12 @@ public class CatalogoClient {
     private final RestClient restClient;
 
     @Autowired
-    public CatalogoClient(@Value("${catalogo.service.url:http://localhost:8082}") String catalogoUrl) {
+    public CatalogoClient(
+            @Value("${catalogo.service.url:http://localhost:8082}") String catalogoUrl,
+            @Value("${rutaexpress.secreto.interno}") String secretoInterno) {
         this.restClient = RestClient.builder()
                 .baseUrl(catalogoUrl)
+                .defaultHeader("X-Servicio-Interno", secretoInterno)
                 .build();
     }
 
