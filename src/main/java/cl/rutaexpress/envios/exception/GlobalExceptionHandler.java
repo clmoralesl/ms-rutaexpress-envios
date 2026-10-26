@@ -12,6 +12,15 @@ import java.util.stream.Collectors;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
+    @ExceptionHandler(AccesoDenegadoException.class)
+    public ResponseEntity<Map<String, String>> manejarAccesoDenegado(
+            AccesoDenegadoException ex) {
+
+        return ResponseEntity
+                .status(HttpStatus.FORBIDDEN)
+                .body(Map.of("mensaje", ex.getMessage()));
+    }
+
     @ExceptionHandler(EnvioNoEncontradoException.class)
     public ResponseEntity<Map<String, String>> manejarEnvioNoEncontrado(
             EnvioNoEncontradoException ex) {

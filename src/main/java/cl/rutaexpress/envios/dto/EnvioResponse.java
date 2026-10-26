@@ -18,7 +18,8 @@ public record EnvioResponse(
         BigDecimal pesoKg,
         EstadoEnvio estado,
         LocalDateTime fechaCreacion,
-        LocalDateTime fechaActualizacion
+        LocalDateTime fechaActualizacion,
+        String creadoPorEmail
 ) {
 
     public EnvioResponse(
@@ -45,7 +46,39 @@ public record EnvioResponse(
                 pesoKg,
                 estado,
                 fechaCreacion,
-                fechaActualizacion
+                fechaActualizacion,
+                null
+        );
+    }
+
+    public EnvioResponse(
+            Long id,
+            String codigoSeguimiento,
+            String rutRemitente,
+            String rutDestinatario,
+            DireccionResponse origen,
+            DireccionResponse destino,
+            String direccionOrigen,
+            String direccionDestino,
+            BigDecimal pesoKg,
+            EstadoEnvio estado,
+            LocalDateTime fechaCreacion,
+            LocalDateTime fechaActualizacion
+    ) {
+        this(
+                id,
+                codigoSeguimiento,
+                rutRemitente,
+                rutDestinatario,
+                origen,
+                destino,
+                direccionOrigen,
+                direccionDestino,
+                pesoKg,
+                estado,
+                fechaCreacion,
+                fechaActualizacion,
+                null
         );
     }
 
@@ -86,7 +119,8 @@ public record EnvioResponse(
                 envio.getPesoKg(),
                 envio.getEstado(),
                 envio.getFechaCreacion(),
-                envio.getFechaActualizacion()
+                envio.getFechaActualizacion(),
+                envio.getCreadoPorEmail()
         );
     }
 }

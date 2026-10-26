@@ -16,6 +16,7 @@
 
 	<properties>
 		<java.version>17</java.version>
+		<pruebas.grupos.excluidos>integracion-externa</pruebas.grupos.excluidos>
 	</properties>
 
 	<dependencies>
@@ -105,7 +106,23 @@
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
 			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<configuration>
+					<excludedGroups>${pruebas.grupos.excluidos}</excludedGroups>
+				</configuration>
+			</plugin>
 		</plugins>
 	</build>
+
+	<profiles>
+		<profile>
+			<id>integracion-externa</id>
+			<properties>
+				<pruebas.grupos.excluidos>ninguno</pruebas.grupos.excluidos>
+			</properties>
+		</profile>
+	</profiles>
 
 </project>

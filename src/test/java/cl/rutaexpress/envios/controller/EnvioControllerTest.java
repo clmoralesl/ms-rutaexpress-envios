@@ -2,6 +2,8 @@ package cl.rutaexpress.envios.controller;
 
 import cl.rutaexpress.envios.dto.ActualizarEstadoRequest;
 import cl.rutaexpress.envios.dto.EnvioResponse;
+import cl.rutaexpress.envios.dto.EventoSeguimientoDto;
+import cl.rutaexpress.envios.dto.SeguimientoPublicoResponse;
 import cl.rutaexpress.envios.entity.EstadoEnvio;
 import cl.rutaexpress.envios.exception.CapacidadFlotaAgotadaException;
 import cl.rutaexpress.envios.exception.EnvioNoEncontradoException;
@@ -16,24 +18,32 @@ import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
+import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 
-import cl.rutaexpress.envios.dto.EventoSeguimientoDto;
-import cl.rutaexpress.envios.dto.SeguimientoPublicoResponse;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
 
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @WebMvcTest(EnvioController.class)
 @Import(GlobalExceptionHandler.class)
+@TestPropertySource(properties = {
+        "rutaexpress.secreto.interno=test-secreto-interno-envios-seguro-32caracteres"
+})
 class EnvioControllerTest {
+
+    private static final String SECRETO = "test-secreto-interno-envios-seguro-32caracteres";
+    private static final String OID_ADMIN = "oid-admin-123";
 
     @Autowired
     private MockMvc mockMvc;
@@ -61,10 +71,13 @@ class EnvioControllerTest {
                 LocalDateTime.now()
         );
 
-        when(envioService.actualizarEstado(eq(1L), eq(EstadoEnvio.ACEPTADO), eq(1L)))
+        when(envioService.actualizarEstado(eq(1L), eq(EstadoEnvio.ACEPTADO), eq(1L), any()))
                 .thenReturn(response);
 
         mockMvc.perform(put("/api/envios/1/estado")
+                        .header("X-Servicio-Interno", SECRETO)
+                        .header("X-Usuario-Oid", OID_ADMIN)
+                        .header("X-Usuario-Roles", "ADMIN")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isOk())
@@ -78,10 +91,13 @@ class EnvioControllerTest {
     void testActualizarEstadoCapacidadAgotada() throws Exception {
         ActualizarEstadoRequest request = new ActualizarEstadoRequest(EstadoEnvio.ACEPTADO, 2L);
 
-        when(envioService.actualizarEstado(eq(2L), eq(EstadoEnvio.ACEPTADO), eq(2L)))
+        when(envioService.actualizarEstado(eq(2L), eq(EstadoEnvio.ACEPTADO), eq(2L), any()))
                 .thenThrow(new CapacidadFlotaAgotadaException(2L));
 
         mockMvc.perform(put("/api/envios/2/estado")
+                        .header("X-Servicio-Interno", SECRETO)
+                        .header("X-Usuario-Oid", OID_ADMIN)
+                        .header("X-Usuario-Roles", "ADMIN")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isConflict())
@@ -93,10 +109,13 @@ class EnvioControllerTest {
     void testActualizarEstadoTransicionInvalida() throws Exception {
         ActualizarEstadoRequest request = new ActualizarEstadoRequest(EstadoEnvio.ENTREGADO, null);
 
-        when(envioService.actualizarEstado(eq(3L), eq(EstadoEnvio.ENTREGADO), eq(null)))
+        when(envioService.actualizarEstado(eq(3L), eq(EstadoEnvio.ENTREGADO), eq(null), any()))
                 .thenThrow(new TransicionEstadoInvalidaException(EstadoEnvio.CREADO, EstadoEnvio.ENTREGADO));
 
         mockMvc.perform(put("/api/envios/3/estado")
+                        .header("X-Servicio-Interno", SECRETO)
+                        .header("X-Usuario-Oid", OID_ADMIN)
+                        .header("X-Usuario-Roles", "ADMIN")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isBadRequest())
@@ -108,10 +127,13 @@ class EnvioControllerTest {
     void testActualizarEstadoNoEncontrado() throws Exception {
         ActualizarEstadoRequest request = new ActualizarEstadoRequest(EstadoEnvio.CANCELADO, null);
 
-        when(envioService.actualizarEstado(eq(999L), eq(EstadoEnvio.CANCELADO), eq(null)))
+        when(envioService.actualizarEstado(eq(999L), eq(EstadoEnvio.CANCELADO), eq(null), any()))
                 .thenThrow(new EnvioNoEncontradoException(999L));
 
         mockMvc.perform(put("/api/envios/999/estado")
+                        .header("X-Servicio-Interno", SECRETO)
+                        .header("X-Usuario-Oid", OID_ADMIN)
+                        .header("X-Usuario-Roles", "ADMIN")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isNotFound())
@@ -121,10 +143,13 @@ class EnvioControllerTest {
     @Test
     @DisplayName("POST /api/envios/{id}/etiqueta retorna 202 Accepted y solicita emision a q.cmd.label")
     void testSolicitarEtiquetaExito() throws Exception {
-        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/envios/1/etiqueta"))
+        mockMvc.perform(post("/api/envios/1/etiqueta")
+                        .header("X-Servicio-Interno", SECRETO)
+                        .header("X-Usuario-Oid", OID_ADMIN)
+                        .header("X-Usuario-Roles", "ADMIN"))
                 .andExpect(status().isAccepted());
 
-        org.mockito.Mockito.verify(envioService).solicitarGeneracionEtiqueta(eq(1L));
+        verify(envioService).solicitarGeneracionEtiqueta(eq(1L), any());
     }
 
     @Test
