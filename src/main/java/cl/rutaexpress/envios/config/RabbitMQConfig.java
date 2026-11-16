@@ -2,7 +2,7 @@ package cl.rutaexpress.envios.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.amqp.core.DirectExchange;
-import org.springframework.amqp.core.TopicExchange;
+import org.springframework.amqp.core.ExchangeBuilder;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
@@ -10,6 +10,10 @@ import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+/**
+ * El productor declara solo el exchange en el que publica. Las colas y bindings
+ * los declara ms-rutaexpress-notificaciones (issue #99).
+ */
 @Configuration
 public class RabbitMQConfig {
 
@@ -27,12 +31,7 @@ public class RabbitMQConfig {
 
     @Bean
     public DirectExchange cmdDirectExchange() {
-        return new DirectExchange(EXCHANGE_DIRECT, true, false);
-    }
-
-    @Bean
-    public TopicExchange cmdTopicExchange() {
-        return new TopicExchange(EXCHANGE_TOPIC, true, false);
+        return ExchangeBuilder.directExchange(EXCHANGE_DIRECT).durable(true).build();
     }
 
     @Bean
