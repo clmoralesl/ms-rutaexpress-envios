@@ -66,6 +66,74 @@ public class GlobalExceptionHandler {
                 .body(Map.of("mensaje", ex.getMessage()));
     }
 
+    @ExceptionHandler(CatalogoNoDisponibleException.class)
+    public ResponseEntity<Map<String, String>> manejarCatalogoNoDisponible(
+            CatalogoNoDisponibleException ex) {
+
+        return ResponseEntity
+                .status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(Map.of(
+                        "mensaje", "El servicio de catálogo no está disponible; intente nuevamente en unos instantes",
+                        "codigo", "CATALOGO_NO_DISPONIBLE"));
+    }
+
+    @ExceptionHandler(CotizacionRechazadaException.class)
+    public ResponseEntity<Map<String, String>> manejarCotizacionRechazada(
+            CotizacionRechazadaException ex) {
+
+        HttpStatus estado = ex.getStatus() == 400 ? HttpStatus.BAD_REQUEST : HttpStatus.UNPROCESSABLE_ENTITY;
+        return ResponseEntity
+                .status(estado)
+                .body(Map.of(
+                        "mensaje", ex.getMessage() != null ? ex.getMessage() : "Cotización rechazada por el catálogo",
+                        "codigo", ex.getCodigo() != null ? ex.getCodigo() : "COTIZACION_RECHAZADA"));
+    }
+
+    @ExceptionHandler(EnvioSinServicioException.class)
+    public ResponseEntity<Map<String, String>> manejarEnvioSinServicio(
+            EnvioSinServicioException ex) {
+
+        return ResponseEntity
+                .status(HttpStatus.CONFLICT)
+                .body(Map.of("mensaje", ex.getMessage(), "codigo", EnvioSinServicioException.CODIGO));
+    }
+
+    @ExceptionHandler(EnvioSinPrecioFinalException.class)
+    public ResponseEntity<Map<String, String>> manejarEnvioSinPrecioFinal(
+            EnvioSinPrecioFinalException ex) {
+
+        return ResponseEntity
+                .status(HttpStatus.CONFLICT)
+                .body(Map.of("mensaje", ex.getMessage(), "codigo", EnvioSinPrecioFinalException.CODIGO));
+    }
+
+    @ExceptionHandler(EnvioBloqueadoException.class)
+    public ResponseEntity<Map<String, String>> manejarEnvioBloqueado(
+            EnvioBloqueadoException ex) {
+
+        return ResponseEntity
+                .status(HttpStatus.CONFLICT)
+                .body(Map.of("mensaje", ex.getMessage(), "codigo", "ENVIO_BLOQUEADO"));
+    }
+
+    @ExceptionHandler(AceptacionRequiereEndpointException.class)
+    public ResponseEntity<Map<String, String>> manejarAceptacionRequiereEndpoint(
+            AceptacionRequiereEndpointException ex) {
+
+        return ResponseEntity
+                .status(HttpStatus.BAD_REQUEST)
+                .body(Map.of("mensaje", ex.getMessage()));
+    }
+
+    @ExceptionHandler(CorreoInvalidoException.class)
+    public ResponseEntity<Map<String, String>> manejarCorreoInvalido(
+            CorreoInvalidoException ex) {
+
+        return ResponseEntity
+                .status(HttpStatus.BAD_REQUEST)
+                .body(Map.of("mensaje", ex.getMessage()));
+    }
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<Map<String, Object>> manejarValidaciones(
             MethodArgumentNotValidException ex) {

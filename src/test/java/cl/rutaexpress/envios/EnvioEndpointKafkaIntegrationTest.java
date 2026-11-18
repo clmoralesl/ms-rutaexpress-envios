@@ -1,7 +1,6 @@
 package cl.rutaexpress.envios;
 
 import cl.rutaexpress.envios.client.CatalogoClient;
-import cl.rutaexpress.envios.dto.ActualizarEstadoRequest;
 import cl.rutaexpress.envios.dto.CrearEnvioRequest;
 import cl.rutaexpress.envios.dto.EnvioResponse;
 import cl.rutaexpress.envios.entity.EstadoEnvio;
@@ -38,7 +37,9 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.when;
 
 /**
  * Prueba de integración con broker Kafka real. Requiere Docker levantado y perfil -Pintegracion-externa.
@@ -105,6 +106,7 @@ class EnvioEndpointKafkaIntegrationTest {
     @Test
     @DisplayName("Validacion contra Cluster Kafka Real: Envio a topico aislado con particionamiento por clave")
     void testPublicacionHaciaClusterKafkaReal() throws Exception {
+        when(catalogoClient.cotizar(any())).thenReturn(TestEnvioFactory.cotizacion(1L, 1L, 6000L));
         doNothing().when(catalogoClient).descontarCapacidad(1L);
 
         // 1. Crear envio via REST API con codigo unico
@@ -144,12 +146,11 @@ class EnvioEndpointKafkaIntegrationTest {
 
         int particionEsperada = recordCreacion.partition();
 
-        // 3. Avanzar estado a ACEPTADO
-        ActualizarEstadoRequest aceptarReq = new ActualizarEstadoRequest(EstadoEnvio.ACEPTADO, 1L);
+        // 3. Aceptar con verificacion via POST /api/envios/{id}/aceptacion
         ResponseEntity<EnvioResponse> aceptarRes = restTemplate.exchange(
-                "/api/envios/" + envioId + "/estado",
-                HttpMethod.PUT,
-                new HttpEntity<>(aceptarReq),
+                "/api/envios/" + envioId + "/aceptacion",
+                HttpMethod.POST,
+                new HttpEntity<>(TestEnvioFactory.aceptacionValida()),
                 EnvioResponse.class
         );
         assertEquals(HttpStatus.OK, aceptarRes.getStatusCode());

@@ -1,5 +1,6 @@
 package cl.rutaexpress.envios.controller;
 
+import cl.rutaexpress.envios.dto.AceptarEnvioRequest;
 import cl.rutaexpress.envios.dto.ActualizarEstadoRequest;
 import cl.rutaexpress.envios.dto.EnvioResponse;
 import cl.rutaexpress.envios.dto.EventoSeguimientoDto;
@@ -28,6 +29,7 @@ import java.util.List;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -57,7 +59,7 @@ class EnvioControllerTest {
     @Test
     @DisplayName("PUT /api/envios/{id}/estado retorna 200 OK en transicion valida")
     void testActualizarEstadoExito() throws Exception {
-        ActualizarEstadoRequest request = new ActualizarEstadoRequest(EstadoEnvio.ACEPTADO, 1L);
+        ActualizarEstadoRequest request = new ActualizarEstadoRequest(EstadoEnvio.EN_BODEGA);
         EnvioResponse response = new EnvioResponse(
                 1L,
                 "RE-TEST-100",
@@ -66,12 +68,12 @@ class EnvioControllerTest {
                 "Origen",
                 "Destino",
                 new BigDecimal("3.00"),
-                EstadoEnvio.ACEPTADO,
+                EstadoEnvio.EN_BODEGA,
                 LocalDateTime.now(),
                 LocalDateTime.now()
         );
 
-        when(envioService.actualizarEstado(eq(1L), eq(EstadoEnvio.ACEPTADO), eq(1L), any()))
+        when(envioService.actualizarEstado(eq(1L), eq(EstadoEnvio.EN_BODEGA), any()))
                 .thenReturn(response);
 
         mockMvc.perform(put("/api/envios/1/estado")
@@ -82,19 +84,19 @@ class EnvioControllerTest {
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.id").value(1L))
-                .andExpect(jsonPath("$.estado").value("ACEPTADO"))
+                .andExpect(jsonPath("$.estado").value("EN_BODEGA"))
                 .andExpect(jsonPath("$.codigoSeguimiento").value("RE-TEST-100"));
     }
 
     @Test
-    @DisplayName("PUT /api/envios/{id}/estado retorna 409 Conflict cuando la capacidad de flota esta agotada")
-    void testActualizarEstadoCapacidadAgotada() throws Exception {
-        ActualizarEstadoRequest request = new ActualizarEstadoRequest(EstadoEnvio.ACEPTADO, 2L);
+    @DisplayName("POST /api/envios/{id}/aceptacion retorna 409 Conflict cuando la capacidad de flota esta agotada")
+    void testAceptarCapacidadAgotada() throws Exception {
+        AceptarEnvioRequest request = new AceptarEnvioRequest(new BigDecimal("2.00"), null, null, null, null);
 
-        when(envioService.actualizarEstado(eq(2L), eq(EstadoEnvio.ACEPTADO), eq(2L), any()))
+        when(envioService.aceptar(eq(2L), any(AceptarEnvioRequest.class), any()))
                 .thenThrow(new CapacidadFlotaAgotadaException(2L));
 
-        mockMvc.perform(put("/api/envios/2/estado")
+        mockMvc.perform(post("/api/envios/2/aceptacion")
                         .header("X-Servicio-Interno", SECRETO)
                         .header("X-Usuario-Oid", OID_ADMIN)
                         .header("X-Usuario-Roles", "ADMIN")
@@ -105,11 +107,39 @@ class EnvioControllerTest {
     }
 
     @Test
+    @DisplayName("POST /api/envios/{id}/aceptacion sin pesoVerificadoKg retorna 400 y no invoca al servicio")
+    void testAceptarSinPesoVerificadoResponde400() throws Exception {
+        mockMvc.perform(post("/api/envios/2/aceptacion")
+                        .header("X-Servicio-Interno", SECRETO)
+                        .header("X-Usuario-Oid", OID_ADMIN)
+                        .header("X-Usuario-Roles", "ADMIN")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"largoCm\":10,\"anchoCm\":10,\"altoCm\":10}"))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(envioService);
+    }
+
+    @Test
+    @DisplayName("POST /api/envios/{id}/aceptacion con medidas incompletas retorna 400")
+    void testAceptarMedidasIncompletasResponde400() throws Exception {
+        mockMvc.perform(post("/api/envios/2/aceptacion")
+                        .header("X-Servicio-Interno", SECRETO)
+                        .header("X-Usuario-Oid", OID_ADMIN)
+                        .header("X-Usuario-Roles", "ADMIN")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"pesoVerificadoKg\":2.5,\"largoCm\":10}"))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(envioService);
+    }
+
+    @Test
     @DisplayName("PUT /api/envios/{id}/estado retorna 400 Bad Request en transicion invalida")
     void testActualizarEstadoTransicionInvalida() throws Exception {
-        ActualizarEstadoRequest request = new ActualizarEstadoRequest(EstadoEnvio.ENTREGADO, null);
+        ActualizarEstadoRequest request = new ActualizarEstadoRequest(EstadoEnvio.ENTREGADO);
 
-        when(envioService.actualizarEstado(eq(3L), eq(EstadoEnvio.ENTREGADO), eq(null), any()))
+        when(envioService.actualizarEstado(eq(3L), eq(EstadoEnvio.ENTREGADO), any()))
                 .thenThrow(new TransicionEstadoInvalidaException(EstadoEnvio.CREADO, EstadoEnvio.ENTREGADO));
 
         mockMvc.perform(put("/api/envios/3/estado")
@@ -125,9 +155,9 @@ class EnvioControllerTest {
     @Test
     @DisplayName("PUT /api/envios/{id}/estado retorna 404 Not Found si el envio no existe")
     void testActualizarEstadoNoEncontrado() throws Exception {
-        ActualizarEstadoRequest request = new ActualizarEstadoRequest(EstadoEnvio.CANCELADO, null);
+        ActualizarEstadoRequest request = new ActualizarEstadoRequest(EstadoEnvio.CANCELADO);
 
-        when(envioService.actualizarEstado(eq(999L), eq(EstadoEnvio.CANCELADO), eq(null), any()))
+        when(envioService.actualizarEstado(eq(999L), eq(EstadoEnvio.CANCELADO), any()))
                 .thenThrow(new EnvioNoEncontradoException(999L));
 
         mockMvc.perform(put("/api/envios/999/estado")

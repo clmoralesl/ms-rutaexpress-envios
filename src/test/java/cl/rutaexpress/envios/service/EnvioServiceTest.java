@@ -13,7 +13,9 @@ import cl.rutaexpress.envios.dto.TicketBodegaPayload;
 import cl.rutaexpress.envios.entity.Comuna;
 import cl.rutaexpress.envios.entity.Envio;
 import cl.rutaexpress.envios.entity.EstadoEnvio;
+import cl.rutaexpress.envios.entity.Medidas;
 import cl.rutaexpress.envios.entity.Region;
+import cl.rutaexpress.envios.exception.AceptacionRequiereEndpointException;
 import cl.rutaexpress.envios.exception.CapacidadFlotaAgotadaException;
 import cl.rutaexpress.envios.exception.ComunaNoEncontradaException;
 import cl.rutaexpress.envios.exception.TransicionEstadoInvalidaException;
@@ -23,6 +25,7 @@ import cl.rutaexpress.envios.repository.ComunaRepository;
 import cl.rutaexpress.envios.repository.EnvioRepository;
 import cl.rutaexpress.envios.repository.RegionRepository;
 import cl.rutaexpress.envios.testutil.UsuariosPrueba;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -33,7 +36,12 @@ import org.mockito.Mock;
 import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+
 import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -89,6 +97,7 @@ class EnvioServiceTest {
         lenient().when(generadorCodigoSeguimiento.generar()).thenReturn("RTX-2026-TEST01");
         lenient().when(comunaRepository.findById(13101)).thenReturn(Optional.of(comunaSantiago));
         lenient().when(comunaRepository.findById(13123)).thenReturn(Optional.of(comunaProvidencia));
+        lenient().when(catalogoClient.cotizar(any())).thenReturn(TestEnvioFactory.cotizacion(1L, 1L, 6000L));
 
         envioService = new EnvioService(
                 envioRepository,
@@ -100,6 +109,26 @@ class EnvioServiceTest {
                 publicadorRabbitMQ,
                 publicadorKafkaEnvios
         );
+    }
+
+    @AfterEach
+    void limpiarSincronizacion() {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+    }
+
+    /** Simula el inicio de una transaccion para los metodos que exigen sincronizacion activa. */
+    private void iniciarTransaccionSimulada() {
+        TransactionSynchronizationManager.initSynchronization();
+    }
+
+    /** Simula el commit: ejecuta afterCommit y afterCompletion de lo registrado. */
+    private void confirmarTransaccionSimulada() {
+        List<TransactionSynchronization> registradas =
+                new ArrayList<>(TransactionSynchronizationManager.getSynchronizations());
+        registradas.forEach(TransactionSynchronization::afterCommit);
+        registradas.forEach(s -> s.afterCompletion(TransactionSynchronization.STATUS_COMMITTED));
     }
 
     private Envio crearEnvioMock(Long id, String codigo, EstadoEnvio estado) {
@@ -155,18 +184,30 @@ class EnvioServiceTest {
         assertEquals(new BigDecimal("3.00"), evento.detalles().get("pesoKg"));
     }
 
-    @Test
-    @DisplayName("Transicion a ACEPTADO: Descuenta capacidad en catalogo, publica en RabbitMQ y Kafka")
-    void testTransicionAceptadoExito() {
-        Envio envio = crearEnvioMock(10L, "RE-TEST-001", EstadoEnvio.CREADO);
-        when(envioRepository.findById(10L)).thenReturn(Optional.of(envio));
-        when(envioRepository.save(any(Envio.class))).thenAnswer(invocation -> invocation.getArgument(0));
+    private Envio crearEnvioPreregistrado(Long id, String codigo, Long servicioId) {
+        Envio envio = crearEnvioMock(id, codigo, EstadoEnvio.CREADO);
+        envio.setSucursalOrigenId(1L);
+        envio.setServicioId(servicioId);
+        envio.setMedidasDeclaradas(new Medidas(30, 20, 10));
+        return envio;
+    }
 
-        EnvioResponse response = envioService.actualizarEstado(10L, EstadoEnvio.ACEPTADO, 2L, UsuariosPrueba.admin());
+    @Test
+    @DisplayName("Aceptar: recalcula, descuenta el cupo del servicio del envio, publica en RabbitMQ y Kafka")
+    void testTransicionAceptadoExito() {
+        Envio envio = crearEnvioPreregistrado(10L, "RE-TEST-001", 2L);
+        when(envioRepository.findByIdParaActualizar(10L)).thenReturn(Optional.of(envio));
+        when(envioRepository.saveAndFlush(any(Envio.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(catalogoClient.cotizar(any())).thenReturn(TestEnvioFactory.cotizacion(2L, 1L, 7000L));
+
+        iniciarTransaccionSimulada();
+        EnvioResponse response = envioService.aceptar(10L, TestEnvioFactory.aceptacionValida(), UsuariosPrueba.admin());
+        confirmarTransaccionSimulada();
 
         assertEquals(EstadoEnvio.ACEPTADO, response.estado());
 
         verify(catalogoClient, times(1)).descontarCapacidad(2L);
+        verify(catalogoClient, never()).restablecerCapacidad(any());
 
         verify(publicadorRabbitMQ, times(2)).publicar(any(), any(), mensajeCaptor.capture());
         var mensajes = mensajeCaptor.getAllValues();
@@ -182,29 +223,48 @@ class EnvioServiceTest {
         assertEquals(10L, evento.envioId());
         assertEquals(EstadoEnvio.CREADO, evento.estadoAnterior());
         assertEquals(EstadoEnvio.ACEPTADO, evento.estadoNuevo());
+        assertEquals(2L, evento.detalles().get("servicioId"));
+        assertEquals(7000L, evento.detalles().get("precioFinalClp"));
     }
 
     @Test
-    @DisplayName("Transicion a ACEPTADO con capacidad agotada: lanza excepcion y no publica en brokers")
+    @DisplayName("Aceptar con capacidad agotada: lanza excepcion, no guarda, no compensa y no publica en brokers")
     void testTransicionAceptadoCapacidadAgotada() {
-        Envio envio = crearEnvioMock(10L, "RE-TEST-002", EstadoEnvio.CREADO);
-        when(envioRepository.findById(10L)).thenReturn(Optional.of(envio));
+        Envio envio = crearEnvioPreregistrado(10L, "RE-TEST-002", 3L);
+        when(envioRepository.findByIdParaActualizar(10L)).thenReturn(Optional.of(envio));
+        when(catalogoClient.cotizar(any())).thenReturn(TestEnvioFactory.cotizacion(3L, 1L, 7000L));
         doThrow(new CapacidadFlotaAgotadaException(3L)).when(catalogoClient).descontarCapacidad(3L);
 
+        iniciarTransaccionSimulada();
         assertThrows(CapacidadFlotaAgotadaException.class, () ->
-                envioService.actualizarEstado(10L, EstadoEnvio.ACEPTADO, 3L, UsuariosPrueba.admin())
+                envioService.aceptar(10L, TestEnvioFactory.aceptacionValida(), UsuariosPrueba.admin())
         );
+        // Aun si la transaccion termina en rollback, no hay nada que compensar porque el descuento no ocurrio
+        TransactionSynchronizationManager.getSynchronizations()
+                .forEach(s -> s.afterCompletion(TransactionSynchronization.STATUS_ROLLED_BACK));
 
-        verify(envioRepository, never()).save(any());
+        verify(envioRepository, never()).saveAndFlush(any());
+        verify(catalogoClient, never()).restablecerCapacidad(any());
         verify(publicadorRabbitMQ, never()).publicar(any(), any(), any());
         verify(publicadorKafkaEnvios, never()).publicarEvento(any());
+    }
+
+    @Test
+    @DisplayName("PUT estado con ACEPTADO responde error de endpoint y no consulta el envio ni el catalogo")
+    void testActualizarEstadoAceptadoExigeEndpointDeAceptacion() {
+        assertThrows(AceptacionRequiereEndpointException.class, () ->
+                envioService.actualizarEstado(10L, EstadoEnvio.ACEPTADO, UsuariosPrueba.admin())
+        );
+
+        verify(envioRepository, never()).findByIdParaActualizar(any());
+        verifyNoInteractions(catalogoClient);
     }
 
     @Test
     @DisplayName("Transicion a EN_RUTA: publica email de despacho y evento en Kafka")
     void testTransicionEnRutaExito() {
         Envio envio = crearEnvioMock(20L, "RE-TEST-003", EstadoEnvio.EN_BODEGA);
-        when(envioRepository.findById(20L)).thenReturn(Optional.of(envio));
+        when(envioRepository.findByIdParaActualizar(20L)).thenReturn(Optional.of(envio));
         when(envioRepository.save(any(Envio.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
         EnvioResponse response = envioService.actualizarEstado(20L, EstadoEnvio.EN_RUTA, UsuariosPrueba.admin());
@@ -229,7 +289,7 @@ class EnvioServiceTest {
     @DisplayName("Transicion a ENTREGADO: publica email de entrega final y evento en Kafka")
     void testTransicionEntregadoExito() {
         Envio envio = crearEnvioMock(30L, "RE-TEST-004", EstadoEnvio.EN_RUTA);
-        when(envioRepository.findById(30L)).thenReturn(Optional.of(envio));
+        when(envioRepository.findByIdParaActualizar(30L)).thenReturn(Optional.of(envio));
         when(envioRepository.save(any(Envio.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
         EnvioResponse response = envioService.actualizarEstado(30L, EstadoEnvio.ENTREGADO, UsuariosPrueba.admin());
@@ -252,7 +312,7 @@ class EnvioServiceTest {
     @DisplayName("Transicion a CANCELADO: no descuenta catalogo, no publica en RabbitMQ, si publica en Kafka")
     void testTransicionCanceladoExito() {
         Envio envio = crearEnvioMock(50L, "RE-TEST-006", EstadoEnvio.CREADO);
-        when(envioRepository.findById(50L)).thenReturn(Optional.of(envio));
+        when(envioRepository.findByIdParaActualizar(50L)).thenReturn(Optional.of(envio));
         when(envioRepository.save(any(Envio.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
         EnvioResponse response = envioService.actualizarEstado(50L, EstadoEnvio.CANCELADO, UsuariosPrueba.admin());
@@ -273,7 +333,7 @@ class EnvioServiceTest {
     @DisplayName("Transicion invalida: CREADO -> EN_RUTA lanza TransicionEstadoInvalidaException")
     void testTransicionInvalida() {
         Envio envio = crearEnvioMock(40L, "RE-TEST-005", EstadoEnvio.CREADO);
-        when(envioRepository.findById(40L)).thenReturn(Optional.of(envio));
+        when(envioRepository.findByIdParaActualizar(40L)).thenReturn(Optional.of(envio));
 
         assertThrows(TransicionEstadoInvalidaException.class, () ->
                 envioService.actualizarEstado(40L, EstadoEnvio.EN_RUTA, UsuariosPrueba.admin())

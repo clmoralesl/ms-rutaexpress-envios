@@ -2,6 +2,7 @@ package cl.rutaexpress.envios;
 
 import cl.rutaexpress.envios.client.CatalogoClient;
 import cl.rutaexpress.envios.config.RabbitMQConfig;
+import cl.rutaexpress.envios.dto.AceptarEnvioRequest;
 import cl.rutaexpress.envios.dto.ActualizarEstadoRequest;
 import cl.rutaexpress.envios.dto.CrearEnvioRequest;
 import cl.rutaexpress.envios.dto.EnvioResponse;
@@ -31,6 +32,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
 /**
@@ -77,6 +79,8 @@ class EnvioEndpointRabbitMQIntegrationTest {
     @Test
     @DisplayName("Endpoint Real: Crear envio, avanzar a ACEPTADO y validar recepcion real en RabbitMQ")
     void testFlujoCompletoConRabbitMQReal() {
+        when(catalogoClient.cotizar(any())).thenReturn(TestEnvioFactory.cotizacion(1L, 1L, 6000L));
+
         // 1. Crear envio via POST /api/envios
         CrearEnvioRequest crearReq = TestEnvioFactory.crearRequestValido("12345678-5", "98765432-1", new BigDecimal("3.50"));
 
@@ -94,13 +98,12 @@ class EnvioEndpointRabbitMQIntegrationTest {
         // 2. Configurar mock de catalogo para simular descuento exitoso
         doNothing().when(catalogoClient).descontarCapacidad(1L);
 
-        // 3. Transicionar a ACEPTADO via PUT /api/envios/{id}/estado
-        ActualizarEstadoRequest aceptarReq = new ActualizarEstadoRequest(EstadoEnvio.ACEPTADO, 1L);
-        HttpEntity<ActualizarEstadoRequest> requestEntity = new HttpEntity<>(aceptarReq);
+        // 3. Aceptar via POST /api/envios/{id}/aceptacion
+        HttpEntity<AceptarEnvioRequest> requestEntity = new HttpEntity<>(TestEnvioFactory.aceptacionValida());
 
         ResponseEntity<EnvioResponse> aceptarResp = restTemplate.exchange(
-                "/api/envios/" + envioId + "/estado",
-                HttpMethod.PUT,
+                "/api/envios/" + envioId + "/aceptacion",
+                HttpMethod.POST,
                 requestEntity,
                 EnvioResponse.class
         );
@@ -119,11 +122,11 @@ class EnvioEndpointRabbitMQIntegrationTest {
         assertNotNull(mensajeBodegaRaw, "El ticket de picking debe haber llegado a la cola real q.cmd.warehouse de RabbitMQ");
 
         // 6. Transicionar a EN_BODEGA
-        ActualizarEstadoRequest bodegaReq = new ActualizarEstadoRequest(EstadoEnvio.EN_BODEGA, null);
+        ActualizarEstadoRequest bodegaReq = new ActualizarEstadoRequest(EstadoEnvio.EN_BODEGA);
         restTemplate.exchange("/api/envios/" + envioId + "/estado", HttpMethod.PUT, new HttpEntity<>(bodegaReq), EnvioResponse.class);
 
         // 7. Transicionar a EN_RUTA y verificar correo real en RabbitMQ
-        ActualizarEstadoRequest enRutaReq = new ActualizarEstadoRequest(EstadoEnvio.EN_RUTA, null);
+        ActualizarEstadoRequest enRutaReq = new ActualizarEstadoRequest(EstadoEnvio.EN_RUTA);
         ResponseEntity<EnvioResponse> enRutaResp = restTemplate.exchange(
                 "/api/envios/" + envioId + "/estado",
                 HttpMethod.PUT,
@@ -136,7 +139,7 @@ class EnvioEndpointRabbitMQIntegrationTest {
         assertNotNull(emailEnRuta, "El mensaje de envio en ruta debe llegar a q.cmd.email");
 
         // 8. Transicionar a ENTREGADO y verificar correo real en RabbitMQ
-        ActualizarEstadoRequest entregadoReq = new ActualizarEstadoRequest(EstadoEnvio.ENTREGADO, null);
+        ActualizarEstadoRequest entregadoReq = new ActualizarEstadoRequest(EstadoEnvio.ENTREGADO);
         ResponseEntity<EnvioResponse> entregadoResp = restTemplate.exchange(
                 "/api/envios/" + envioId + "/estado",
                 HttpMethod.PUT,
@@ -152,20 +155,22 @@ class EnvioEndpointRabbitMQIntegrationTest {
     @Test
     @DisplayName("Endpoint Real: Respuesta 409 Conflict cuando catalogo rechaza por capacidad agotada")
     void testRechazoPorCapacidadAgotadaEndpoint() {
-        // Crear envio
-        CrearEnvioRequest crearReq = TestEnvioFactory.crearRequestValido("12345678-5", "98765432-1", new BigDecimal("1.50"));
+        when(catalogoClient.cotizar(any())).thenReturn(TestEnvioFactory.cotizacion(3L, 1L, 6000L));
+
+        // Crear envio con el servicio 3
+        CrearEnvioRequest crearReq = TestEnvioFactory.crearRequest(
+                "12345678-5", "98765432-1", new BigDecimal("1.50"), 3L, 1L, "remitente@empresa.cl");
         ResponseEntity<EnvioResponse> crearResp = restTemplate.postForEntity("/api/envios", crearReq, EnvioResponse.class);
         Long envioId = crearResp.getBody().id();
 
         // Configurar Catalogo para lanzar CapacidadFlotaAgotadaException
         doThrow(new CapacidadFlotaAgotadaException(3L)).when(catalogoClient).descontarCapacidad(3L);
 
-        // Invocar PUT /api/envios/{id}/estado
-        ActualizarEstadoRequest aceptarReq = new ActualizarEstadoRequest(EstadoEnvio.ACEPTADO, 3L);
+        // Invocar POST /api/envios/{id}/aceptacion
         ResponseEntity<Map<String, String>> errorResp = restTemplate.exchange(
-                "/api/envios/" + envioId + "/estado",
-                HttpMethod.PUT,
-                new HttpEntity<>(aceptarReq),
+                "/api/envios/" + envioId + "/aceptacion",
+                HttpMethod.POST,
+                new HttpEntity<>(TestEnvioFactory.aceptacionValida()),
                 new ParameterizedTypeReference<Map<String, String>>() {}
         );
 
@@ -181,12 +186,13 @@ class EnvioEndpointRabbitMQIntegrationTest {
     @Test
     @DisplayName("Endpoint Real: Respuesta 400 Bad Request en transicion invalida")
     void testTransicionInvalidaEndpoint() {
+        when(catalogoClient.cotizar(any())).thenReturn(TestEnvioFactory.cotizacion(1L, 1L, 6000L));
         CrearEnvioRequest crearReq = TestEnvioFactory.crearRequestValido("12345678-5", "98765432-1", new BigDecimal("2.00"));
         ResponseEntity<EnvioResponse> crearResp = restTemplate.postForEntity("/api/envios", crearReq, EnvioResponse.class);
         Long envioId = crearResp.getBody().id();
 
         // Intentar pasar directamente de CREADO a ENTREGADO
-        ActualizarEstadoRequest reqInvalido = new ActualizarEstadoRequest(EstadoEnvio.ENTREGADO, null);
+        ActualizarEstadoRequest reqInvalido = new ActualizarEstadoRequest(EstadoEnvio.ENTREGADO);
         ResponseEntity<Map<String, String>> errorResp = restTemplate.exchange(
                 "/api/envios/" + envioId + "/estado",
                 HttpMethod.PUT,
