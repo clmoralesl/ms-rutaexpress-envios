@@ -3,13 +3,22 @@ package cl.rutaexpress.envios.service;
 import cl.rutaexpress.envios.client.CatalogoClient;
 import cl.rutaexpress.envios.config.RabbitMQConfig;
 import cl.rutaexpress.envios.dto.*;
+import cl.rutaexpress.envios.dto.catalogo.CotizacionCatalogoRequest;
+import cl.rutaexpress.envios.dto.catalogo.CotizacionCatalogoResponse;
 import cl.rutaexpress.envios.entity.Comuna;
 import cl.rutaexpress.envios.entity.Envio;
 import cl.rutaexpress.envios.entity.EstadoEnvio;
+import cl.rutaexpress.envios.entity.InstantaneaPrecio;
+import cl.rutaexpress.envios.entity.Medidas;
 import cl.rutaexpress.envios.entity.Region;
+import cl.rutaexpress.envios.exception.AceptacionRequiereEndpointException;
 import cl.rutaexpress.envios.exception.AccesoDenegadoException;
+import cl.rutaexpress.envios.exception.CatalogoNoDisponibleException;
 import cl.rutaexpress.envios.exception.ComunaNoEncontradaException;
+import cl.rutaexpress.envios.exception.EnvioBloqueadoException;
 import cl.rutaexpress.envios.exception.EnvioNoEncontradoException;
+import cl.rutaexpress.envios.exception.EnvioSinPrecioFinalException;
+import cl.rutaexpress.envios.exception.EnvioSinServicioException;
 import cl.rutaexpress.envios.exception.TransicionEstadoInvalidaException;
 import cl.rutaexpress.envios.publisher.PublicadorKafkaEnvios;
 import cl.rutaexpress.envios.publisher.PublicadorRabbitMQ;
@@ -18,7 +27,10 @@ import cl.rutaexpress.envios.repository.EnvioRepository;
 import cl.rutaexpress.envios.repository.RegionRepository;
 import cl.rutaexpress.envios.security.PoliticaAcceso;
 import cl.rutaexpress.envios.security.UsuarioActual;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -27,12 +39,16 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Set;
+import java.util.Map;
+import java.util.Objects;
 
 @Service
 @Transactional(readOnly = true)
 public class EnvioService {
+
+    private static final Logger log = LoggerFactory.getLogger(EnvioService.class);
 
     private static final int MAX_INTENTOS_CODIGO = 5;
 
@@ -97,17 +113,42 @@ public class EnvioService {
         }
         politicaAcceso.validarPuedeCrear(usuario);
 
-        // 1. Resolver y validar existencia de Comunas en el catalogo CUT
-        Comuna comunaOrigen = comunaRepository.findById(request.origen().idComuna())
-                .orElseThrow(() -> new ComunaNoEncontradaException(request.origen().idComuna()));
+        // 0. Correo del remitente (D7c): el personal lo informa; el CLIENTE usa el de su token
+        String remitenteEmail;
+        if (politicaAcceso.puedeGestionar(usuario)) {
+            remitenteEmail = NormalizadorCorreo.normalizar(request.remitenteEmail());
+        } else {
+            remitenteEmail = NormalizadorCorreo.normalizarOpcional(usuario.email());
+        }
 
+        // 1. Validar la comuna de destino antes de llamar al catalogo
         Comuna comunaDestino = comunaRepository.findById(request.destino().idComuna())
                 .orElseThrow(() -> new ComunaNoEncontradaException(request.destino().idComuna()));
 
+        // 1.1 Cotizacion del catalogo: valida servicio, sucursal activa y cobertura, y entrega la direccion de la sucursal
+        Medidas medidasDeclaradas = Medidas.de(request.largoCm(), request.anchoCm(), request.altoCm());
+        CotizacionCatalogoResponse cotizacion = catalogoClient.cotizar(new CotizacionCatalogoRequest(
+                request.servicioId(),
+                request.sucursalOrigenId(),
+                comunaDestino.getIdComuna(),
+                request.pesoKg(),
+                medidasDeclaradas,
+                true));
+
+        // 1.2 El origen se copia de la sucursal (D2); una comuna desconocida es una inconsistencia entre catalogos
+        CotizacionCatalogoResponse.DireccionSucursal sucursal = cotizacion.direccionSucursal();
+        if (sucursal == null || sucursal.idComuna() == null) {
+            throw new IllegalStateException("El catalogo no devolvio la direccion de la sucursal " + request.sucursalOrigenId());
+        }
+        Comuna comunaOrigen = comunaRepository.findById(sucursal.idComuna())
+                .orElseThrow(() -> new IllegalStateException(
+                        "La comuna " + sucursal.idComuna() + " de la sucursal " + request.sucursalOrigenId()
+                                + " no existe en el catalogo geografico de envios"));
+
         // 2. Normalizar campos textuales (NFC, espacios, caracteres seguros, numero S/N)
-        String calleOrigen = normalizadorDireccion.normalizarTexto(request.origen().calle(), "calleOrigen", true, 120);
-        String numeroOrigen = normalizadorDireccion.normalizarNumero(request.origen().numero(), "numeroOrigen");
-        String complementoOrigen = normalizadorDireccion.normalizarTexto(request.origen().complemento(), "complementoOrigen", false, 80);
+        String calleOrigen = normalizadorDireccion.normalizarTexto(sucursal.calle(), "calleOrigen", true, 120);
+        String numeroOrigen = normalizadorDireccion.normalizarNumero(sucursal.numero(), "numeroOrigen");
+        String complementoOrigen = normalizadorDireccion.normalizarTexto(sucursal.complemento(), "complementoOrigen", false, 80);
 
         String calleDestino = normalizadorDireccion.normalizarTexto(request.destino().calle(), "calleDestino", true, 120);
         String numeroDestino = normalizadorDireccion.normalizarNumero(request.destino().numero(), "numeroDestino");
@@ -145,6 +186,11 @@ public class EnvioService {
 
         envio.setCreadoPorOid(usuario.oid());
         envio.setCreadoPorEmail(usuario.email());
+        envio.setSucursalOrigenId(request.sucursalOrigenId());
+        envio.setServicioId(request.servicioId());
+        envio.setMedidasDeclaradas(medidasDeclaradas);
+        envio.setPrecioEstimado(InstantaneaPrecio.desde(cotizacion));
+        envio.setRemitenteEmail(remitenteEmail);
 
         Envio envioGuardado = envioRepository.save(envio);
 
@@ -152,16 +198,22 @@ public class EnvioService {
         String usuarioRol = (usuario.roles() != null && !usuario.roles().isEmpty())
                 ? String.join(",", usuario.roles()) : null;
 
+        Map<String, Object> detallesCreacion = new LinkedHashMap<>();
+        detallesCreacion.put("servicioId", request.servicioId());
+        detallesCreacion.put("sucursalOrigenId", request.sucursalOrigenId());
+        detallesCreacion.put("precioEstimadoClp", cotizacion.totalClp());
+        detallesCreacion.put("zonaEstimada", cotizacion.zona());
+
         // 6. Publicacion de eventos post-commit para garantizar consistencia transaccional con usuario real
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override
                 public void afterCommit() {
-                    publicarEventoKafka(envioGuardado, null, EstadoEnvio.CREADO, usuarioEmail, usuarioRol, dirOrigenCompuesta, dirDestinoCompuesta);
+                    publicarEventoKafka(envioGuardado, null, EstadoEnvio.CREADO, usuarioEmail, usuarioRol, dirOrigenCompuesta, dirDestinoCompuesta, detallesCreacion);
                 }
             });
         } else {
-            publicarEventoKafka(envioGuardado, null, EstadoEnvio.CREADO, usuarioEmail, usuarioRol, dirOrigenCompuesta, dirDestinoCompuesta);
+            publicarEventoKafka(envioGuardado, null, EstadoEnvio.CREADO, usuarioEmail, usuarioRol, dirOrigenCompuesta, dirDestinoCompuesta, detallesCreacion);
         }
 
         return EnvioResponse.fromEntity(envioGuardado, dirOrigenCompuesta, dirDestinoCompuesta);
@@ -175,10 +227,9 @@ public class EnvioService {
 
         Envio envio = buscarPorId(id);
 
-        if (!politicaAcceso.puedeVerTodos(usuario)) {
-            if (envio.getCreadoPorOid() == null || !envio.getCreadoPorOid().equals(usuario.oid())) {
-                throw new AccesoDenegadoException("No tiene acceso a este envío");
-            }
+        String correoNormalizado = NormalizadorCorreo.normalizarOpcional(usuario.email());
+        if (!politicaAcceso.puedeVerEnvio(usuario, envio, correoNormalizado)) {
+            throw new AccesoDenegadoException("No tiene acceso a este envío");
         }
 
         String dirOrigen = obtenerDireccionOrigenCompuesta(envio);
@@ -262,10 +313,15 @@ public class EnvioService {
         }
 
         // Filtro por propietario a nivel de consulta SQL (D1, D3, D5)
+        // El CLIENTE ve los envios que creo (oid) o cuyo remitente coincide con su correo normalizado (D8)
         if (!politicaAcceso.puedeVerTodos(usuario)) {
+            final String correoNormalizado = NormalizadorCorreo.normalizarOpcional(usuario.email());
             specification = specification.and(
-                    (root, query, cb) ->
-                            cb.equal(root.get("creadoPorOid"), usuario.oid())
+                    (root, query, cb) -> correoNormalizado == null
+                            ? cb.equal(root.get("creadoPorOid"), usuario.oid())
+                            : cb.or(
+                                    cb.equal(root.get("creadoPorOid"), usuario.oid()),
+                                    cb.equal(root.get("remitenteEmail"), correoNormalizado))
             );
         }
 
@@ -281,46 +337,42 @@ public class EnvioService {
 
     @Transactional
     public EnvioResponse actualizarEstado(Long id, EstadoEnvio nuevoEstado, UsuarioActual usuario) {
-        return actualizarEstado(id, nuevoEstado, null, usuario);
-    }
-
-    @Transactional
-    public EnvioResponse actualizarEstado(
-            Long id,
-            EstadoEnvio nuevoEstado,
-            Long servicioId,
-            UsuarioActual usuario) {
 
         if (usuario == null) {
             throw new AccesoDenegadoException("Identidad de usuario requerida");
         }
         politicaAcceso.validarPuedeGestionar(usuario);
 
+        // La aceptacion tiene su propio endpoint: recalcula el precio y descuenta el cupo del servicio del envio
+        if (nuevoEstado == EstadoEnvio.ACEPTADO) {
+            throw new AceptacionRequiereEndpointException();
+        }
+
         String usuarioEmail = usuario.email();
         String usuarioRol = (usuario.roles() != null && !usuario.roles().isEmpty())
                 ? String.join(",", usuario.roles()) : null;
 
-        return actualizarEstadoInterno(id, nuevoEstado, servicioId, usuarioEmail, usuarioRol);
+        return actualizarEstadoInterno(id, nuevoEstado, usuarioEmail, usuarioRol);
     }
 
     private EnvioResponse actualizarEstadoInterno(
             Long id,
             EstadoEnvio nuevoEstado,
-            Long servicioId,
             String usuarioEmail,
             String usuarioRol) {
 
-        Envio envio = buscarPorId(id);
+        Envio envio = bloquearParaActualizar(id);
 
         validarTransicion(envio.getEstado(), nuevoEstado);
 
-        EstadoEnvio estadoAnterior = envio.getEstado();
-
-        // Si la transicion es hacia ACEPTADO, descontar capacidad vehicular en el catalogo
-        if (nuevoEstado == EstadoEnvio.ACEPTADO) {
-            Long idServicio = (servicioId != null) ? servicioId : 1L;
-            catalogoClient.descontarCapacidad(idServicio);
+        // D9c: un envio con servicio no avanza a bodega o ruta sin precio final (los envios antiguos sin servicio si)
+        if ((nuevoEstado == EstadoEnvio.EN_BODEGA || nuevoEstado == EstadoEnvio.EN_RUTA)
+                && envio.getServicioId() != null
+                && (envio.getPrecioFinal() == null || envio.getPrecioFinal().totalClp() == null)) {
+            throw new EnvioSinPrecioFinalException(id);
         }
+
+        EstadoEnvio estadoAnterior = envio.getEstado();
 
         envio.setEstado(nuevoEstado);
 
@@ -335,15 +387,151 @@ public class EnvioService {
                 @Override
                 public void afterCommit() {
                     publicarEventosRabbitMQ(envioGuardado, nuevoEstado, dirOrigen, dirDestino);
-                    publicarEventoKafka(envioGuardado, estadoAnterior, nuevoEstado, usuarioEmail, usuarioRol, dirOrigen, dirDestino);
+                    publicarEventoKafka(envioGuardado, estadoAnterior, nuevoEstado, usuarioEmail, usuarioRol, dirOrigen, dirDestino, null);
                 }
             });
         } else {
             publicarEventosRabbitMQ(envioGuardado, nuevoEstado, dirOrigen, dirDestino);
-            publicarEventoKafka(envioGuardado, estadoAnterior, nuevoEstado, usuarioEmail, usuarioRol, dirOrigen, dirDestino);
+            publicarEventoKafka(envioGuardado, estadoAnterior, nuevoEstado, usuarioEmail, usuarioRol, dirOrigen, dirDestino, null);
         }
 
         return EnvioResponse.fromEntity(envioGuardado, dirOrigen, dirDestino);
+    }
+
+    /**
+     * Aceptacion con verificacion (D5): bloquea el envio, recalcula el precio con el peso y las medidas
+     * verificados, descuenta el cupo del servicio del envio y registra la compensacion por si la
+     * transaccion se revierte.
+     */
+    @Transactional
+    public EnvioResponse aceptar(Long id, AceptarEnvioRequest solicitud, UsuarioActual usuario) {
+        if (usuario == null) {
+            throw new AccesoDenegadoException("Identidad de usuario requerida");
+        }
+        politicaAcceso.validarPuedeGestionar(usuario);
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            throw new IllegalStateException("La aceptacion requiere una transaccion activa");
+        }
+
+        Envio envio = bloquearParaActualizar(id);
+        validarTransicion(envio.getEstado(), EstadoEnvio.ACEPTADO);
+        if (envio.getServicioId() == null || envio.getSucursalOrigenId() == null) {
+            throw new EnvioSinServicioException(id);
+        }
+
+        // D12: sin medidas en la aceptacion se usan las declaradas
+        Medidas verificadas = Medidas.de(solicitud.largoCm(), solicitud.anchoCm(), solicitud.altoCm());
+        if (verificadas == null) {
+            verificadas = envio.getMedidasDeclaradas();
+        }
+
+        // La sucursal puede haberse desactivado despues del pre-registro: el paquete ya esta en ella
+        CotizacionCatalogoResponse cotizacion = catalogoClient.cotizar(new CotizacionCatalogoRequest(
+                envio.getServicioId(),
+                envio.getSucursalOrigenId(),
+                envio.getComunaDestino().getIdComuna(),
+                solicitud.pesoVerificadoKg(),
+                verificadas,
+                false));
+
+        Long servicioId = envio.getServicioId();
+        try {
+            catalogoClient.descontarCapacidad(servicioId);
+        } catch (CatalogoNoDisponibleException e) {
+            // D6c: el resultado del descuento es incierto, no se compensa; queda para conciliacion manual
+            log.error("Resultado incierto al descontar el cupo del servicio {} del envio {}: no se compensa, requiere conciliacion manual",
+                    servicioId, id, e);
+            throw e;
+        }
+        registrarCompensacion(servicioId, id);
+
+        EstadoEnvio estadoAnterior = envio.getEstado();
+        InstantaneaPrecio precioFinal = InstantaneaPrecio.desde(cotizacion);
+        envio.registrarAceptacion(
+                solicitud.pesoVerificadoKg(),
+                verificadas,
+                precioFinal,
+                NormalizadorCorreo.normalizarOpcional(usuario.email()),
+                LocalDateTime.now());
+
+        Envio guardado = envioRepository.saveAndFlush(envio);
+
+        String dirOrigen = obtenerDireccionOrigenCompuesta(guardado);
+        String dirDestino = obtenerDireccionDestinoCompuesta(guardado);
+        String usuarioEmail = usuario.email();
+        String usuarioRol = (usuario.roles() != null && !usuario.roles().isEmpty())
+                ? String.join(",", usuario.roles()) : null;
+        Map<String, Object> detalles = detallesAceptacion(guardado, solicitud.observacion());
+
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                publicarEventosRabbitMQ(guardado, EstadoEnvio.ACEPTADO, dirOrigen, dirDestino);
+                publicarEventoKafka(guardado, estadoAnterior, EstadoEnvio.ACEPTADO, usuarioEmail, usuarioRol, dirOrigen, dirDestino, detalles);
+            }
+        });
+
+        return EnvioResponse.fromEntity(guardado, dirOrigen, dirDestino);
+    }
+
+    private Envio bloquearParaActualizar(Long id) {
+        try {
+            return envioRepository.findByIdParaActualizar(id)
+                    .orElseThrow(() -> new EnvioNoEncontradoException(id));
+        } catch (PessimisticLockingFailureException e) {
+            throw new EnvioBloqueadoException(id);
+        }
+    }
+
+    private void registrarCompensacion(Long servicioId, Long envioId) {
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCompletion(int status) {
+                if (status == STATUS_COMMITTED) {
+                    return;
+                }
+                try {
+                    catalogoClient.restablecerCapacidad(servicioId);
+                    log.warn("Cupo del servicio {} restablecido tras revertir la aceptacion del envio {}", servicioId, envioId);
+                } catch (RuntimeException e) {
+                    log.error("Compensacion fallida: no se restablecio el cupo del servicio {} del envio {}", servicioId, envioId, e);
+                }
+            }
+        });
+    }
+
+    private Map<String, Object> detallesAceptacion(Envio envio, String observacion) {
+        Medidas declaradas = envio.getMedidasDeclaradas();
+        Medidas verificadas = envio.getMedidasVerificadas();
+        boolean corregido = envio.getPesoKg() == null
+                || envio.getPesoVerificadoKg() == null
+                || envio.getPesoKg().compareTo(envio.getPesoVerificadoKg()) != 0
+                || !Objects.equals(declaradas, verificadas);
+
+        Map<String, Object> detalles = new LinkedHashMap<>();
+        detalles.put("pesoDeclaradoKg", envio.getPesoKg());
+        detalles.put("pesoVerificadoKg", envio.getPesoVerificadoKg());
+        detalles.put("medidasDeclaradas", medidasComoMapa(declaradas));
+        detalles.put("medidasVerificadas", medidasComoMapa(verificadas));
+        detalles.put("precioEstimadoClp", envio.getPrecioEstimado() != null ? envio.getPrecioEstimado().totalClp() : null);
+        detalles.put("precioFinalClp", envio.getPrecioFinal() != null ? envio.getPrecioFinal().totalClp() : null);
+        detalles.put("zona", envio.getPrecioFinal() != null ? envio.getPrecioFinal().zona() : null);
+        detalles.put("servicioId", envio.getServicioId());
+        detalles.put("corregido", corregido);
+        String obs = observacion != null ? observacion.strip() : null;
+        detalles.put("observacion", (obs == null || obs.isEmpty()) ? null : obs);
+        return detalles;
+    }
+
+    private Map<String, Object> medidasComoMapa(Medidas medidas) {
+        if (medidas == null) {
+            return null;
+        }
+        Map<String, Object> mapa = new LinkedHashMap<>();
+        mapa.put("largoCm", medidas.largoCm());
+        mapa.put("anchoCm", medidas.anchoCm());
+        mapa.put("altoCm", medidas.altoCm());
+        return mapa;
     }
 
     @Transactional
@@ -451,7 +639,8 @@ public class EnvioService {
             String usuarioEmail,
             String usuarioRol,
             String dirOrigen,
-            String dirDestino) {
+            String dirDestino,
+            Map<String, Object> detalles) {
         EventoEnvioKafka evento = EventoEnvioKafka.deTransicion(
                 envio,
                 estadoAnterior,
@@ -460,7 +649,7 @@ public class EnvioService {
                 usuarioRol,
                 dirOrigen,
                 dirDestino,
-                null
+                detalles
         );
         publicadorKafkaEnvios.publicarEvento(evento);
     }

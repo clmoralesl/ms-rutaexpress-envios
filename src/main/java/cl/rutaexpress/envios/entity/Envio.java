@@ -62,6 +62,64 @@ public class Envio {
     @Column(name = "creado_por_email", length = 320, updatable = false)
     private String creadoPorEmail;
 
+    // ===== Pre-registro y aceptacion (issue #88): todas las columnas son opcionales =====
+
+    @Column(name = "sucursal_origen_id")
+    private Long sucursalOrigenId;
+
+    @Column(name = "servicio_id")
+    private Long servicioId;
+
+    @Embedded
+    @AttributeOverrides({
+            @AttributeOverride(name = "largoCm", column = @Column(name = "largo_declarado_cm")),
+            @AttributeOverride(name = "anchoCm", column = @Column(name = "ancho_declarado_cm")),
+            @AttributeOverride(name = "altoCm", column = @Column(name = "alto_declarado_cm"))
+    })
+    private Medidas medidasDeclaradas;
+
+    @Column(name = "peso_verificado_kg", precision = 10, scale = 2)
+    private BigDecimal pesoVerificadoKg;
+
+    @Embedded
+    @AttributeOverrides({
+            @AttributeOverride(name = "largoCm", column = @Column(name = "largo_verificado_cm")),
+            @AttributeOverride(name = "anchoCm", column = @Column(name = "ancho_verificado_cm")),
+            @AttributeOverride(name = "altoCm", column = @Column(name = "alto_verificado_cm"))
+    })
+    private Medidas medidasVerificadas;
+
+    @Embedded
+    @AttributeOverrides({
+            @AttributeOverride(name = "zona", column = @Column(name = "zona_estimada", length = 30)),
+            @AttributeOverride(name = "factorZona", column = @Column(name = "factor_zona_estimado", precision = 4, scale = 2)),
+            @AttributeOverride(name = "tarifaBase", column = @Column(name = "tarifa_base_estimada", precision = 10, scale = 2)),
+            @AttributeOverride(name = "precioPorKg", column = @Column(name = "precio_kg_estimado", precision = 10, scale = 2)),
+            @AttributeOverride(name = "pesoFacturableKg", column = @Column(name = "peso_facturable_estimado_kg", precision = 10, scale = 2)),
+            @AttributeOverride(name = "totalClp", column = @Column(name = "precio_estimado_clp"))
+    })
+    private InstantaneaPrecio precioEstimado;
+
+    @Embedded
+    @AttributeOverrides({
+            @AttributeOverride(name = "zona", column = @Column(name = "zona_final", length = 30)),
+            @AttributeOverride(name = "factorZona", column = @Column(name = "factor_zona_final", precision = 4, scale = 2)),
+            @AttributeOverride(name = "tarifaBase", column = @Column(name = "tarifa_base_final", precision = 10, scale = 2)),
+            @AttributeOverride(name = "precioPorKg", column = @Column(name = "precio_kg_final", precision = 10, scale = 2)),
+            @AttributeOverride(name = "pesoFacturableKg", column = @Column(name = "peso_facturable_final_kg", precision = 10, scale = 2)),
+            @AttributeOverride(name = "totalClp", column = @Column(name = "precio_final_clp"))
+    })
+    private InstantaneaPrecio precioFinal;
+
+    @Column(name = "remitente_email", length = 254)
+    private String remitenteEmail;
+
+    @Column(name = "verificado_por_email", length = 320)
+    private String verificadoPorEmail;
+
+    @Column(name = "fecha_aceptacion")
+    private LocalDateTime fechaAceptacion;
+
     @Column(name = "fecha_creacion", nullable = false)
     private LocalDateTime fechaCreacion;
 
@@ -229,5 +287,83 @@ public class Envio {
 
     public void setEstado(EstadoEnvio estado) {
         this.estado = estado;
+    }
+
+    public Long getSucursalOrigenId() {
+        return sucursalOrigenId;
+    }
+
+    public void setSucursalOrigenId(Long sucursalOrigenId) {
+        this.sucursalOrigenId = sucursalOrigenId;
+    }
+
+    public Long getServicioId() {
+        return servicioId;
+    }
+
+    public void setServicioId(Long servicioId) {
+        this.servicioId = servicioId;
+    }
+
+    public Medidas getMedidasDeclaradas() {
+        return medidasDeclaradas;
+    }
+
+    public void setMedidasDeclaradas(Medidas medidasDeclaradas) {
+        this.medidasDeclaradas = medidasDeclaradas;
+    }
+
+    public BigDecimal getPesoVerificadoKg() {
+        return pesoVerificadoKg;
+    }
+
+    public Medidas getMedidasVerificadas() {
+        return medidasVerificadas;
+    }
+
+    public InstantaneaPrecio getPrecioEstimado() {
+        return precioEstimado;
+    }
+
+    public void setPrecioEstimado(InstantaneaPrecio precioEstimado) {
+        this.precioEstimado = precioEstimado;
+    }
+
+    public InstantaneaPrecio getPrecioFinal() {
+        return precioFinal;
+    }
+
+    public String getRemitenteEmail() {
+        return remitenteEmail;
+    }
+
+    public void setRemitenteEmail(String remitenteEmail) {
+        this.remitenteEmail = remitenteEmail;
+    }
+
+    public String getVerificadoPorEmail() {
+        return verificadoPorEmail;
+    }
+
+    public LocalDateTime getFechaAceptacion() {
+        return fechaAceptacion;
+    }
+
+    /**
+     * Registra la aceptacion: peso y medidas verificados, precio final, quien verifico y cuando.
+     * Cambia el estado a ACEPTADO.
+     */
+    public void registrarAceptacion(
+            BigDecimal pesoVerificadoKg,
+            Medidas medidasVerificadas,
+            InstantaneaPrecio precioFinal,
+            String verificadoPorEmail,
+            LocalDateTime fechaAceptacion) {
+        this.pesoVerificadoKg = pesoVerificadoKg;
+        this.medidasVerificadas = medidasVerificadas;
+        this.precioFinal = precioFinal;
+        this.verificadoPorEmail = verificadoPorEmail;
+        this.fechaAceptacion = fechaAceptacion;
+        this.estado = EstadoEnvio.ACEPTADO;
     }
 }

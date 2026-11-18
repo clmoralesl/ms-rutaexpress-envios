@@ -6,8 +6,6 @@ import jakarta.validation.constraints.NotNull;
 public record ActualizarEstadoRequest(
 
         @NotNull(message = "El nuevo estado es obligatorio")
-        EstadoEnvio estado,
-
-        Long servicioId
+        EstadoEnvio estado
 ) {
 }

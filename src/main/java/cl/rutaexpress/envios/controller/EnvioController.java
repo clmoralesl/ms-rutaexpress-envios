@@ -76,9 +76,19 @@ public class EnvioController {
                 envioService.actualizarEstado(
                         id,
                         request.estado(),
-                        request.servicioId(),
                         usuario
                 )
+        );
+    }
+
+    @PostMapping("/{id}/aceptacion")
+    public ResponseEntity<EnvioResponse> aceptar(
+            @PathVariable Long id,
+            @Valid @RequestBody AceptarEnvioRequest request,
+            UsuarioActual usuario) {
+
+        return ResponseEntity.ok(
+                envioService.aceptar(id, request, usuario)
         );
     }
 
