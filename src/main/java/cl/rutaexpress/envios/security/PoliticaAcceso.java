@@ -1,5 +1,6 @@
 package cl.rutaexpress.envios.security;
 
+import cl.rutaexpress.envios.entity.Envio;
 import cl.rutaexpress.envios.exception.AccesoDenegadoException;
 import org.springframework.stereotype.Component;
 
@@ -21,6 +22,24 @@ public class PoliticaAcceso {
             return false;
         }
         return tieneRol(usuario.roles(), "ADMIN", "DESPACHADOR", "OPERADOR");
+    }
+
+    /**
+     * Visibilidad de un envio concreto. El personal con vista total ve todo. El resto ve el envio si
+     * el oid coincide con el creador, o si el correo del token (ya normalizado, no nulo) coincide
+     * con el correo del remitente guardado.
+     */
+    public boolean puedeVerEnvio(UsuarioActual usuario, Envio envio, String correoNormalizado) {
+        if (usuario == null || envio == null) {
+            return false;
+        }
+        if (puedeVerTodos(usuario)) {
+            return true;
+        }
+        if (envio.getCreadoPorOid() != null && envio.getCreadoPorOid().equals(usuario.oid())) {
+            return true;
+        }
+        return correoNormalizado != null && correoNormalizado.equals(envio.getRemitenteEmail());
     }
 
     public boolean puedeCrear(UsuarioActual usuario) {

@@ -28,6 +28,8 @@ import java.math.BigDecimal;
 
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -75,6 +77,7 @@ class EnvioAutorizacionTest {
     @BeforeEach
     void setUp() {
         envioRepository.deleteAll();
+        when(catalogoClient.cotizar(any())).thenReturn(TestEnvioFactory.cotizacion(1L, 1L, 6000L));
 
         Region region = regionRepository.findById(13).orElseGet(() -> regionRepository.save(new Region(13, "Metropolitana de Santiago")));
         Comuna comunaSantiago = comunaRepository.findById(13101).orElseGet(() -> comunaRepository.save(new Comuna(13101, "Santiago", region)));

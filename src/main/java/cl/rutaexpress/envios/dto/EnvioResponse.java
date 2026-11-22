@@ -19,7 +19,8 @@ public record EnvioResponse(
         EstadoEnvio estado,
         LocalDateTime fechaCreacion,
         LocalDateTime fechaActualizacion,
-        String creadoPorEmail
+        String creadoPorEmail,
+        DetallePreregistroResponse preregistro
 ) {
 
     public EnvioResponse(
@@ -47,6 +48,7 @@ public record EnvioResponse(
                 estado,
                 fechaCreacion,
                 fechaActualizacion,
+                null,
                 null
         );
     }
@@ -78,6 +80,7 @@ public record EnvioResponse(
                 estado,
                 fechaCreacion,
                 fechaActualizacion,
+                null,
                 null
         );
     }
@@ -120,7 +123,8 @@ public record EnvioResponse(
                 envio.getEstado(),
                 envio.getFechaCreacion(),
                 envio.getFechaActualizacion(),
-                envio.getCreadoPorEmail()
+                envio.getCreadoPorEmail(),
+                DetallePreregistroResponse.desde(envio)
         );
     }
 }

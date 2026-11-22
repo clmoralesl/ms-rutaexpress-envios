@@ -61,6 +61,8 @@ class EnvioIntegrationTest {
     @Test
     @DisplayName("Ciclo completo E2E: Crear -> Aceptar (descuento cupo y mensajes RabbitMQ + Kafka) -> En Bodega -> En Ruta -> Entregado")
     void testCicloCompletoEnvio() {
+        when(catalogoClient.cotizar(any())).thenReturn(TestEnvioFactory.cotizacion(1L, 1L, 6000L));
+
         // 1. Crear envio
         CrearEnvioRequest crearReq = TestEnvioFactory.crearRequestValido("15555666-7", "18888999-0", new BigDecimal("4.20"));
         EnvioResponse creado = envioService.crear(crearReq, UsuariosPrueba.admin());
@@ -71,11 +73,13 @@ class EnvioIntegrationTest {
                 argThat((EventoEnvioKafka e) -> e.estadoNuevo() == EstadoEnvio.CREADO && e.estadoAnterior() == null)
         );
 
-        // 2. Transicion a ACEPTADO
+        // 2. Aceptacion con verificacion: recalcula el precio y descuenta el cupo del servicio del envio
+        when(catalogoClient.cotizar(any())).thenReturn(TestEnvioFactory.cotizacion(1L, 1L, 7000L));
         doNothing().when(catalogoClient).descontarCapacidad(1L);
 
-        EnvioResponse aceptado = envioService.actualizarEstado(creado.id(), EstadoEnvio.ACEPTADO, 1L, UsuariosPrueba.admin());
+        EnvioResponse aceptado = envioService.aceptar(creado.id(), TestEnvioFactory.aceptacionValida(), UsuariosPrueba.admin());
         assertEquals(EstadoEnvio.ACEPTADO, aceptado.estado());
+        assertEquals(7000L, aceptado.preregistro().precioFinal().totalClp());
 
         verify(catalogoClient, times(1)).descontarCapacidad(1L);
         verify(publicadorRabbitMQ, times(1)).publicar(
